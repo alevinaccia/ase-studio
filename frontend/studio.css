@@ -96,8 +96,18 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: v
 .editor-font-control { display: flex; align-items: center; gap: 5px; font-size: 11px; white-space: nowrap; }
 #editor-font-size { width: 85px; }
 #editor-font-value { min-width: 34px; font-variant-numeric: tabular-nums; }
+.vim-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }
+#vim-bar { flex: 0 0 26px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-top: 1px solid var(--line); color: var(--muted); font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#vim-bar[hidden] { display: none; }
+#vim-status { flex: none; font-weight: 600; white-space: nowrap; }
+#vim-status[data-mode="insert"] { color: #15803d; }
+#vim-status[data-mode="visual"], #vim-status[data-mode="visual-line"] { color: #b45309; }
+#vim-message { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #b91c1c; }
+#vim-command { flex: 1; min-width: 0; border: 0; padding: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; }
+#vim-pending { margin-left: auto; flex: none; white-space: nowrap; }
+.editor-wrap textarea.vim-block::selection { background: rgba(23, 34, 53, .35); }
 #search { width: 190px; border: 1px solid var(--line); border-radius: 4px; padding: 5px; }
-.editor-area { min-height: 0; overflow: auto; overflow-anchor: none; font: var(--editor-font-size)/var(--editor-line-height) "DejaVu Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-ligatures: none; scroll-behavior: smooth; }
+.editor-area { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; font: var(--editor-font-size)/var(--editor-line-height) "DejaVu Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-ligatures: none; scroll-behavior: smooth; }
 .editor-wrap { position: relative; min-height: 300px; background: #fff; }
 .editor-wrap textarea, .editor-wrap pre { margin: 0; border: 0; padding: 10px 14px 10px 55px; width: 100%; min-height: 100%; font: inherit; line-height: var(--editor-line-height); letter-spacing: 0; word-spacing: 0; tab-size: 4; white-space: pre-wrap; overflow-wrap: normal; overflow: hidden; }
 .editor-wrap textarea { position: relative; resize: none; color: transparent; -webkit-text-fill-color: transparent; background: transparent; caret-color: #172235; z-index: 2; outline: 0; }
@@ -422,6 +432,11 @@ html[data-theme="dark"] .step { color: #bae6fd; border-color: #075985; backgroun
 html[data-theme="dark"] .primary { color: #07111f; background: #60a5fa; border-color: #60a5fa; }
 html[data-theme="dark"] .project.selected { background: #17365f; color: #bfdbfe; }
 html[data-theme="dark"] .editor-wrap textarea { caret-color: #f8fafc; }
+html[data-theme="dark"] .editor-wrap textarea.vim-block::selection { background: rgba(248, 250, 252, .4); }
+html[data-theme="dark"] #vim-command { color: #e5edf7; }
+html[data-theme="dark"] #vim-status[data-mode="insert"] { color: #86efac; }
+html[data-theme="dark"] #vim-status[data-mode="visual"], html[data-theme="dark"] #vim-status[data-mode="visual-line"] { color: #fcd34d; }
+html[data-theme="dark"] #vim-message { color: #fca5a5; }
 html[data-theme="dark"] .source-line.protected { background: #202b3a; color: #aebdd0; box-shadow: inset 3px 0 #64748b; }
 html[data-theme="dark"] .source-line.pipeline-selected,
 html[data-theme="dark"] .pipeline-row.row-selected .inst,
