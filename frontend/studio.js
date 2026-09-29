@@ -1898,7 +1898,31 @@ $("#body").addEventListener("input", () => {
   syncEditor();
   restoreEditorViewport(viewport);
 });
+const vimMode = createVimMode({
+  editor: $("#body"),
+  bar: $("#vim-bar"),
+  status: $("#vim-status"),
+  pending: $("#vim-pending"),
+  message: $("#vim-message"),
+  commandLine: $("#vim-command"),
+  scrollArea: () => document.querySelector(".editor-area"),
+  lineElement: lineNumber => document.querySelector(`.source-line[data-line="${lineNumber}"]`),
+  isActive: () => Boolean(current),
+  change(start, end, replacement, selectionStart) {
+    if (editTouchesProtected($("#body").value, start, end)) return false;
+    applyEditorChange(start, end, replacement, selectionStart, selectionStart, null);
+    return true;
+  },
+  undo: undoEditor,
+  redo: redoEditor,
+  save,
+  search(query) {
+    $("#search").value = query;
+    syncEditor();
+  }
+});
 $("#body").addEventListener("keydown", event => {
+  if (vimMode.handleKeydown(event)) return;
   if (event.key === "Tab" || event.key === "ISO_Left_Tab" || event.code === "Tab") {
     event.preventDefault();
     const editor = event.target;
@@ -1966,6 +1990,13 @@ $("#float-register-format").onchange = event => {
 $("#memory-format").value = localStorage.getItem("ase-studio-memory-format") || "hex";
 $("#memory-format").onchange = event => setMemoryFormat(event.target.value);
 setEditorFontSize(localStorage.getItem("ase-studio-editor-font-size") || 14);
+$("#vim-mode").checked = localStorage.getItem("ase-studio-vim-mode") === "on";
+vimMode.setEnabled($("#vim-mode").checked);
+$("#vim-mode").onchange = event => {
+  localStorage.setItem("ase-studio-vim-mode", event.target.checked ? "on" : "off");
+  vimMode.setEnabled(event.target.checked);
+  if (current) $("#body").focus();
+};
 $("#editor-font-size").oninput = event => setEditorFontSize(event.target.value);
 $("#theme-toggle").onclick = () => {
   const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
