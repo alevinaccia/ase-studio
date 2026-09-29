@@ -3,6 +3,21 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 
+launcher_only=false
+case "${1:-}" in
+  "") ;;
+  --launcher-only) launcher_only=true ;;
+  -h|--help)
+    echo "Usage: ./install.sh [--launcher-only]"
+    echo "  --launcher-only  Create launchers without installing system packages."
+    exit 0
+    ;;
+  *)
+    echo "Usage: ./install.sh [--launcher-only]" >&2
+    exit 2
+    ;;
+esac
+
 studio_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 host_root="$(cd "$studio_dir/.." && pwd)"
 application_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -40,6 +55,11 @@ install_system_dependencies() {
 }
 
 if ! python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1")' 2>/dev/null; then
+  if [[ "$launcher_only" == true ]]; then
+    echo "ASE Studio's GTK/WebKit runtime is not available." >&2
+    echo "Run ./utils/installation.sh ase-studio on a machine that still needs GUI dependencies." >&2
+    exit 1
+  fi
   echo "Installing the native ASE Studio runtime dependencies..."
   install_system_dependencies
 fi

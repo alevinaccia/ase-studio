@@ -69,8 +69,8 @@ GEM5_VARIANT = "opt"
 OFFICIAL_GEM5_REPOSITORY = "github.com/cad-polito-it/gem5"
 REQUIRED_BRANCHES_FILE = ROOT / "ase_studio_branches.json"
 
-ENABLE_MEMORY_CONFIGURATION = True
-ENABLE_MULTI_ISSUE_CPU = True
+ENABLE_MEMORY_CONFIGURATION = False
+ENABLE_MULTI_ISSUE_CPU = False
 
 LOCAL_SETUP_PATHSPEC = "setup_default*"
 LOCAL_PROGRAM_PATHSPEC = "programs/**"
@@ -4662,13 +4662,18 @@ def require_startup_repositories():
         elif switched:
             switched_labels.append(f"ASE Studio -> {required['studio']}")
 
+    # Repository mismatches are unsafe and still block startup. Tool paths are
+    # user configuration, however, so an invalid first-run gem5 path must not
+    # prevent the user from opening Settings and correcting it.
+    configuration_warnings = []
     values = setup_environment()
     values.update(environment_overrides())
     location = configured_gem5_location(values)
     if location.get("error"):
-        problems.append(f"The configured gem5 path is invalid: {location['error']}")
+        configuration_warnings.append(
+            f"The configured gem5 path is invalid: {location['error']}")
     elif not Path(location["buildDir"]).is_dir():
-        problems.append(
+        configuration_warnings.append(
             f"The configured gem5 build directory does not exist: {location['buildDir']}")
     else:
         problem, switched = ensure_configured_gem5_branch(
@@ -4689,6 +4694,13 @@ def require_startup_repositories():
     if switched_labels:
         print("ASE Studio selected required branches: "
               + ", ".join(switched_labels), flush=True)
+    if configuration_warnings:
+        print(
+            "ASE Studio started with configuration warnings. "
+            "Open Settings to correct these paths:\n- "
+            + "\n- ".join(configuration_warnings),
+            file=sys.stderr, flush=True,
+        )
     return required
 
 

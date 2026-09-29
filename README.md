@@ -46,6 +46,7 @@ It can also install individual components or a complete frontend explicitly:
 ./utils/installation.sh toolchain
 ./utils/installation.sh gem5
 ./utils/installation.sh ase-studio
+./utils/installation.sh labinf
 ./utils/installation.sh visualizer
 ./utils/installation.sh all-ase
 ./utils/installation.sh all-qt
@@ -54,6 +55,11 @@ It can also install individual components or a complete frontend explicitly:
 `all-ase` installs the RISC-V toolchain, gem5, and ASE Studio. `all-qt`
 installs the same simulator dependencies with the Qt visualizer. The
 installer updates the portable paths and selected frontend in `setup_default`.
+
+On a LabInf workstation, the required compiler, gem5 build, and GUI runtime
+are already installed. Run `./utils/installation.sh labinf` after cloning to
+copy the paths from `setup_default.labinf` into `setup_default` and create the
+ASE Studio application-menu and desktop launchers without reinstalling tools.
 
 ASE Studio has no third-party pip dependencies; its backend uses the Python
 standard library. The native window requires Python 3, PyGObject, GTK 3, and
