@@ -4544,8 +4544,8 @@ def create_submission(projects, assignment, attachments=None, expand_loops=False
             "projects": [entry["name"] for entry in selected_projects]}
 
 
-def reveal_submission_folder(archive_path):
-    """Open the file manager at a completed submission's directory."""
+def submission_archive(archive_path):
+    """Resolve a completed submission ZIP inside the active submissions folder."""
     if not isinstance(archive_path, str) or not archive_path:
         fail("The submission archive path is missing.")
     submissions_root = active_submission_directory()
@@ -4556,6 +4556,12 @@ def reveal_submission_folder(archive_path):
         fail("Invalid submission archive path.")
     if not archive.is_file() or archive.suffix.lower() != ".zip":
         fail("The submission ZIP could not be found.", 404)
+    return archive
+
+
+def reveal_submission_folder(archive_path):
+    """Open the file manager at a completed submission's directory."""
+    archive = submission_archive(archive_path)
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         fail("A Linux desktop session is required to open the submission folder.")
     opener = shutil.which("xdg-open")
@@ -5479,6 +5485,17 @@ class Handler(SimpleHTTPRequestHandler):
             if url.path == "/api/config":
                 folder = project_dir(parse_qs(url.query).get("name", [""])[0])
                 return self.send_json(project_config(folder))
+            if url.path == "/api/submission/download":
+                archive = submission_archive(
+                    parse_qs(url.query).get("archive", [""])[0])
+                data = archive.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{archive.name}"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                return self.wfile.write(data)
             if url.path == "/": self.path = "/index.html"
             if url.path.startswith("/api/"): return self.send_json({"error": "Not found"}, 404)
             return super().do_GET()
