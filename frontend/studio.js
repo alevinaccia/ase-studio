@@ -701,9 +701,17 @@ async function prepareSubmission() {
           body: JSON.stringify({archive: result.archive})
         });
       } catch (revealError) {
-        const warning = "The submission was created, but its folder could not be opened: " + revealError.message;
-        lastNormalLog += "\n\n" + warning;
-        lastAdvancedLog += "\n\n" + warning;
+        // Without a desktop file manager (e.g. Studio opened in a browser), download the ZIP.
+        const link = document.createElement("a");
+        link.href = "/api/submission/download?archive=" + encodeURIComponent(result.archive);
+        link.download = "";
+        document.body.append(link);
+        link.click();
+        link.remove();
+        const note = "The submission folder could not be opened (" + revealError.message +
+          "), so the ZIP was downloaded by the browser instead.";
+        lastNormalLog += "\n\n" + note;
+        lastAdvancedLog += "\n\n" + note;
         updateLog();
       }
     }
