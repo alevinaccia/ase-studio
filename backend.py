@@ -4344,7 +4344,6 @@ def ensure_repository_branch(repository, label, required_branch):
         # ASE Studio's updater always names origin and the branch explicitly.
         command = [
             "switch",
-            "--discard-changes",
             "--no-recurse-submodules",
             "-c",
             required_branch,
@@ -4354,7 +4353,6 @@ def ensure_repository_branch(repository, label, required_branch):
         command = [
             "switch",
             "--no-recurse-submodules",
-            "--discard-changes",
             required_branch,
         ]
 
@@ -4375,30 +4373,38 @@ def ensure_repository_branch(repository, label, required_branch):
 
 
 def align_studio_submodule_branch(required_branch, expected_commit=None):
-    """Attach Studio to the parent-pinned remote commit without losing work."""
+    """Attach a detached Studio checkout to its deployment branch safely.
+
+    ``git submodule update`` intentionally leaves a submodule detached. Prefer
+    the fetched deployment branch when it contains the commit pinned by the
+    parent; otherwise attach the branch to the pinned commit itself. A Studio
+    checkout already on the required branch is left alone, because it may have
+    been updated independently to a newer commit.
+    """
     if expected_commit is None:
         found, expected_commit = git_run(
             ["rev-parse", "HEAD:ase_studio"], cwd=ROOT)
         if not found:
             return None, False
-    remote_ref = f"origin/{required_branch}"
-    found, remote_commit = git_run(
-        ["rev-parse", "--verify", remote_ref], cwd=STUDIO_ROOT)
-    if not found or expected_commit.strip() != remote_commit.strip():
-        # The parent may intentionally lag a newer Studio release. In that
-        # case the normal updater, not submodule reattachment, decides.
-        return None, False
+    expected_commit = expected_commit.strip()
 
-    found, current_commit = git_run(["rev-parse", "HEAD"], cwd=STUDIO_ROOT)
+    found, _current_commit = git_run(["rev-parse", "HEAD"], cwd=STUDIO_ROOT)
     if not found:
         return f"ASE Studio is not a Git checkout: {STUDIO_ROOT}", False
     current_branch = repository_current_branch(STUDIO_ROOT)
-    if (current_branch == required_branch
-            and current_commit.strip() == remote_commit.strip()):
+    if current_branch == required_branch:
         return None, False
 
-    _, dirty = git_run(
+    found, _ = git_run(
+        ["cat-file", "-e", f"{expected_commit}^{{commit}}"], cwd=STUDIO_ROOT)
+    if not found:
+        return ("ASE Studio cannot find the commit pinned by the simulator "
+                f"repository ({expected_commit[:12]})."), False
+
+    inspected, dirty = git_run(
         ["status", "--porcelain", "--untracked-files=no"], cwd=STUDIO_ROOT)
+    if not inspected:
+        return "ASE Studio could not inspect its tracked files before alignment.", False
     if dirty:
         return (
             "ASE Studio is at the parent-pinned release, but its branch cannot "
@@ -4406,16 +4412,31 @@ def align_studio_submodule_branch(required_branch, expected_commit=None):
             "stash them, then start ASE Studio again."
         ), False
 
+    remote_ref = f"origin/{required_branch}"
+    remote_exists, remote_commit = git_run(
+        ["rev-parse", "--verify", remote_ref], cwd=STUDIO_ROOT)
+    target_commit = expected_commit
+    if remote_exists:
+        contains_expected, _ = git_run(
+            ["merge-base", "--is-ancestor", expected_commit,
+             remote_commit.strip()], cwd=STUDIO_ROOT)
+        if contains_expected:
+            target_commit = remote_commit.strip()
+
     local_ref = f"refs/heads/{required_branch}"
     local_exists, local_commit = git_run(
         ["rev-parse", "--verify", local_ref], cwd=STUDIO_ROOT)
-    if local_exists and local_commit.strip() != remote_commit.strip():
+    if local_exists and local_commit.strip() != target_commit:
         compared, ahead_text = git_run(
-            ["rev-list", "--count", f"{remote_ref}..{local_ref}"],
+            ["rev-list", "--count", f"{target_commit}..{local_ref}"],
             cwd=STUDIO_ROOT)
-        if compared and int(ahead_text or "0") > 0:
+        if not compared:
+            return ("ASE Studio could not compare its local deployment branch "
+                    "with the release selected by the simulator."), False
+        if int(ahead_text or "0") > 0:
             short_commit = local_commit.strip()[:12]
-            backup_branch = f"backup/ase-studio-main-{short_commit}"
+            branch_label = required_branch.replace("/", "-")
+            backup_branch = f"backup/ase-studio-{branch_label}-{short_commit}"
             backup_exists, _ = git_run(
                 ["show-ref", "--verify", "--quiet",
                  f"refs/heads/{backup_branch}"], cwd=STUDIO_ROOT)
@@ -4430,11 +4451,17 @@ def align_studio_submodule_branch(required_branch, expected_commit=None):
                       flush=True)
 
     switched, switch_output = git_run(
-        ["switch", "-C", required_branch, remote_ref],
+        ["switch", "-C", required_branch, target_commit],
         timeout=60, cwd=STUDIO_ROOT)
     if not switched:
         detail = switch_output.splitlines()[-1] if switch_output else "Git refused"
         return f"ASE Studio could not reattach '{required_branch}': {detail}", False
+    if remote_exists:
+        # Update checks name origin/<branch> explicitly, so a failure here is
+        # harmless (for example in a single-branch clone with unusual config).
+        git_run(
+            ["branch", "--set-upstream-to", remote_ref, required_branch],
+            cwd=STUDIO_ROOT)
     return None, True
 
 

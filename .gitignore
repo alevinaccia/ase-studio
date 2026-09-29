@@ -1,2 +1,6 @@
 __pycache__/
 *.py[cod]
+
+# Keep private pipeline fixtures local; version updater safety coverage.
+!tests/
+tests/*

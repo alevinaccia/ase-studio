@@ -2120,13 +2120,25 @@ $("#update").onclick = async () => {
     lastAdvancedLog = result.advancedOutput || result.output;
     updateLog();
     if (result.restartRequired) {
+      // Files on disk now belong to the new release, but this page and Python
+      // process still execute the old release. Do not update again until the
+      // application has restarted.
+      $("#update").hidden = true;
+      $("#update").disabled = true;
+      $("#update").title = "Restart ASE Studio to finish the update.";
       await showActionMessage("Update completed",
         "Restart ASE Studio now to load the updated simulator and interface.");
+      return;
+    }
+    if (!result.ok) {
+      await showActionMessage("Update failed",
+        result.output || "ASE Studio could not complete the repository update.");
     }
   } catch (error) {
     lastNormalLog = `Repository update failed\n${error.message}`;
     lastAdvancedLog = lastNormalLog;
     updateLog();
+    await showActionMessage("Update failed", error.message);
   }
   await checkForUpdate();
 };
