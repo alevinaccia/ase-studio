@@ -23,7 +23,9 @@ ICON_PATH = STUDIO_ROOT / "frontend" / "icon.png"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ase_studio.backend import Handler, require_startup_repositories  # noqa: E402
+from ase_studio.backend import (  # noqa: E402
+    Handler, require_startup_repositories, terminate_active_commands,
+)
 from http.server import ThreadingHTTPServer  # noqa: E402
 
 
@@ -160,10 +162,14 @@ def main() -> int:
                 return True
             closing = True
             view.stop_loading()
-            # shutdown() must run outside the server's serve_forever thread.
-            # Let the GTK loop continue until the polling callback below has
-            # safely detached and destroyed WebKit.
-            threading.Thread(target=server.shutdown, daemon=True).start()
+            # Stop the entire gem5/make process group before stopping HTTP.
+            # Both operations run outside GTK's main loop so the window stays
+            # responsive while children receive TERM and, if needed, KILL.
+            def stop_backend():
+                terminate_active_commands()
+                server.shutdown()
+
+            threading.Thread(target=stop_backend, daemon=True).start()
             return True
 
         window.connect("delete-event", request_window_close)
@@ -207,6 +213,7 @@ def main() -> int:
     try:
         return application.run([sys.argv[0]])
     finally:
+        terminate_active_commands()
         if server_thread is not None and server_thread.is_alive():
             server.shutdown()
         if server is not None:

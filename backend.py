@@ -4,6 +4,7 @@
 """Small localhost-only backend for the experimental ASE Studio."""
 from __future__ import annotations
 
+import atexit
 import base64
 import binascii
 import csv
@@ -12,6 +13,7 @@ import io
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import struct
@@ -71,6 +73,10 @@ REQUIRED_BRANCHES_FILE = ROOT / "ase_studio_branches.json"
 
 ENABLE_MEMORY_CONFIGURATION = False
 ENABLE_MULTI_ISSUE_CPU = False
+
+_ACTIVE_COMMANDS = set()
+_ACTIVE_COMMANDS_LOCK = threading.Lock()
+_COMMAND_SHUTDOWN = threading.Event()
 
 LOCAL_SETUP_PATHSPEC = "setup_default*"
 LOCAL_PROGRAM_PATHSPEC = "programs/**"
@@ -873,16 +879,76 @@ def launch_component_installer(component):
             "output": f"Opened an interactive terminal to install {component}."}
 
 
+def _terminate_process_groups(processes, grace_seconds=2.0):
+    """Stop complete command trees without targeting unrelated processes."""
+    running = [process for process in processes if process.poll() is None]
+    for process in running:
+        try:
+            # run_command starts a new session, so its PID is also the process
+            # group ID shared by gem5/make and all of their children.
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            print(f"Could not terminate command group {process.pid}: {error}",
+                  file=sys.stderr, flush=True)
+
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if all(process.poll() is not None for process in running):
+            return
+        time.sleep(0.05)
+
+    for process in running:
+        if process.poll() is not None:
+            continue
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            print(f"Could not kill command group {process.pid}: {error}",
+                  file=sys.stderr, flush=True)
+    for process in running:
+        try:
+            process.wait(timeout=0.5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def terminate_active_commands():
+    """Prevent new commands and terminate every active build/simulation tree."""
+    _COMMAND_SHUTDOWN.set()
+    with _ACTIVE_COMMANDS_LOCK:
+        processes = tuple(_ACTIVE_COMMANDS)
+    _terminate_process_groups(processes)
+
+
+atexit.register(terminate_active_commands)
+
+
 def run_command(command, cwd, env):
     # Keep diagnostics in their real order. Appending separately captured
     # stderr after stdout made gem5's startup message appear after the final
     # trace event, which looked like an accidental second simulation.
-    result = subprocess.run(
-        command, cwd=cwd, env=env, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-    )
-    output = "$ " + " ".join(command) + "\n" + result.stdout
-    return result.returncode, output
+    with _ACTIVE_COMMANDS_LOCK:
+        if _COMMAND_SHUTDOWN.is_set():
+            return 130, "$ " + " ".join(command) + "\nASE Studio is shutting down.\n"
+        process = subprocess.Popen(
+            command, cwd=cwd, env=env, text=True, start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        _ACTIVE_COMMANDS.add(process)
+    try:
+        stdout, _stderr = process.communicate()
+    except BaseException:
+        _terminate_process_groups((process,))
+        raise
+    finally:
+        with _ACTIVE_COMMANDS_LOCK:
+            _ACTIVE_COMMANDS.discard(process)
+    output = "$ " + " ".join(command) + "\n" + (stdout or "")
+    return process.returncode, output
 
 
 def simulation_output_for_display(output, trace):
@@ -5267,7 +5333,12 @@ class Handler(SimpleHTTPRequestHandler):
                     data.get("expandLoops", False)))
             if self.path == "/api/shutdown":
                 self.send_json({"ok": True, "output": "ASE Studio stopped."})
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+                def stop_server():
+                    terminate_active_commands()
+                    self.server.shutdown()
+
+                threading.Thread(target=stop_server, daemon=True).start()
                 return
             fail("Not found.", 404)
         except ValueError as error:
@@ -5325,4 +5396,10 @@ if __name__ == "__main__":
     print(f"ASE Studio: {url}", flush=True)
     if "--open" in sys.argv:
         webbrowser.open(url)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        terminate_active_commands()
+        server.server_close()
