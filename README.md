@@ -89,7 +89,7 @@ Requirements: an Apple Silicon Mac, OrbStack, and about 10 GB of free disk.
    brew install --cask orbstack
    ```
 
-2. Get this repository on the Mac (only `macos.sh` is used there):
+2. Get this repository on the Mac:
 
    ```bash
    git clone https://github.com/cad-polito-it/ase-studio.git
@@ -111,6 +111,12 @@ Requirements: an Apple Silicon Mac, OrbStack, and about 10 GB of free disk.
 
 Use `./macos.sh stop`, `restart`, `status`, or `logs` to manage the server.
 `start` also boots OrbStack and the machine when they are stopped.
+
+`start` and `restart` first copy this checkout into the machine, so the server
+runs the ASE Studio files you have on the Mac (`./macos.sh sync` copies them
+without restarting; frontend changes then need only a browser reload). Keep the
+checkout up to date with `git pull`, or set `ASE_SYNC=0` to keep running the
+copy installed in the machine, for example after using the in-app updater.
 
 Projects, results, and submissions live inside the machine under
 `~/ase_riscv_gem5_sim`. From macOS they are reachable in Finder at
