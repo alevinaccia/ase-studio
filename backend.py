@@ -33,12 +33,15 @@ from urllib.parse import parse_qs, urlparse
 STUDIO_ROOT = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("ASE_STUDIO_HOST_ROOT", STUDIO_ROOT.parent)).resolve()
 PROGRAMS = ROOT / "programs"
+SUBMISSIONS = ROOT / "submissions"
 RESULTS = ROOT / "results"
 FRONTEND = STUDIO_ROOT / "frontend"
 STUDIO_VERSION = (STUDIO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 ENVIRONMENT_CONFIG = ROOT / ".ase-studio-env.json"
 ENVIRONMENT_FIELDS = (
-    "RISCV_TOOLCHAIN_PATH", "OPTIMIZATION_FLAGS", "GEM5_INSTALLATION_PATH",
+    "PROGRAMS_DIRECTORY", "SUBMISSION_DIRECTORY",
+    "RISCV_TOOLCHAIN_PATH", "OPTIMIZATION_FLAGS",
+    "GEM5_INSTALLATION_PATH",
     "PIPELINE_DISPLAY_CYCLE_LIMIT", "SUBMISSION_NAME_PREFIX",
     "SUBMISSION_NAME_SUFFIX",
 )
@@ -46,6 +49,7 @@ OPTIONAL_ENVIRONMENT_FIELDS = {
     "OPTIMIZATION_FLAGS", "SUBMISSION_NAME_PREFIX", "SUBMISSION_NAME_SUFFIX",
 }
 ENVIRONMENT_PATH_FIELDS = {
+    "PROGRAMS_DIRECTORY", "SUBMISSION_DIRECTORY",
     "RISCV_TOOLCHAIN_PATH", "GEM5_INSTALLATION_PATH",
 }
 PORTABLE_ENVIRONMENT_VARIABLES = {
@@ -115,12 +119,39 @@ def validate_project_name(name: str) -> str:
     return name
 
 
+def active_programs_directory() -> Path:
+    """Return the configured project-library directory."""
+    configured = environment_overrides().get("PROGRAMS_DIRECTORY", "")
+    return (resolve_environment_path(configured)
+            if configured else PROGRAMS.resolve())
+
+
+def active_submission_directory() -> Path:
+    """Return the configured root directory for generated submission ZIPs."""
+    configured = environment_overrides().get("SUBMISSION_DIRECTORY", "")
+    return (resolve_environment_path(configured)
+            if configured else SUBMISSIONS.resolve())
+
+
 def project_path(name: str) -> Path:
     name = validate_project_name(name)
-    path = (PROGRAMS / name).resolve()
-    if path.parent != PROGRAMS.resolve():
+    programs = active_programs_directory()
+    path = (programs / name).resolve()
+    if path.parent != programs:
         fail("Invalid project name.")
     return path
+
+
+def project_results_directory(name: str) -> Path:
+    """Keep results from separate project libraries from colliding."""
+    name = validate_project_name(name)
+    programs = active_programs_directory()
+    if programs == PROGRAMS.resolve():
+        root = RESULTS
+    else:
+        library_id = hashlib.sha256(os.fsencode(programs)).hexdigest()[:12]
+        root = RESULTS / "program-libraries" / library_id
+    return (root / name).resolve()
 
 
 def project_dir(name: str) -> Path:
@@ -142,8 +173,8 @@ def rename_project(old_name: str, new_name: str):
         return {"ok": True, "name": new_name}
     if destination.exists():
         fail("A project with that name already exists.")
-    old_results = (RESULTS / old_name).resolve()
-    new_results = (RESULTS / new_name).resolve()
+    old_results = project_results_directory(old_name)
+    new_results = project_results_directory(new_name)
     if new_results.exists():
         fail("Generated results already exist for that project name.")
     source.rename(destination)
@@ -472,6 +503,7 @@ def settings_env():
     env["CC_INSTALLATION_PATH"] = str(compiler.parent) + os.sep
     env["GEM5_INSTALLATION_PATH"] = str(
         resolve_environment_path(env["GEM5_INSTALLATION_PATH"]))
+    env["ASE_STUDIO_DEMO_MK"] = str((PROGRAMS / "demo.mk").resolve())
     # ASE Studio supports the RISC-V optimized gem5 build. Keeping these
     # fixed avoids asking users for path components that are not choices in
     # this frontend.
@@ -488,6 +520,10 @@ def environment_settings():
     values = {}
     for key in ENVIRONMENT_FIELDS:
         item = overrides.get(key, base.get(key, ""))
+        if not item and key == "PROGRAMS_DIRECTORY":
+            item = str(PROGRAMS)
+        elif not item and key == "SUBMISSION_DIRECTORY":
+            item = str(SUBMISSIONS)
         values[key] = (portable_environment_value(item)
                        if key in ENVIRONMENT_PATH_FIELDS else item)
     return {
@@ -700,7 +736,9 @@ def validate_environment_field(key, values):
     """Validate one field, including related values needed to exercise it."""
     if key not in ENVIRONMENT_FIELDS:
         fail("Unknown environment field.")
-    if key in {"RISCV_TOOLCHAIN_PATH", "OPTIMIZATION_FLAGS"}:
+    if key in {"PROGRAMS_DIRECTORY", "SUBMISSION_DIRECTORY"}:
+        required = {key}
+    elif key in {"RISCV_TOOLCHAIN_PATH", "OPTIMIZATION_FLAGS"}:
         required = {"RISCV_TOOLCHAIN_PATH", "OPTIMIZATION_FLAGS"}
     elif key == "PIPELINE_DISPLAY_CYCLE_LIMIT":
         required = {key}
@@ -709,6 +747,30 @@ def validate_environment_field(key, values):
     else:
         required = {"GEM5_INSTALLATION_PATH"}
     cleaned = clean_environment_values(values, required)
+
+    if key == "PROGRAMS_DIRECTORY":
+        programs = resolve_environment_path(cleaned[key])
+        if not programs.is_dir():
+            fail(f"The programs folder does not exist or is not a directory: {programs}")
+        if not os.access(programs, os.R_OK | os.W_OK | os.X_OK):
+            fail(f"The programs folder must be readable and writable: {programs}")
+        return f"Projects will be loaded from {programs}."
+
+    if key == "SUBMISSION_DIRECTORY":
+        submissions = resolve_environment_path(cleaned[key])
+        if submissions.exists():
+            if not submissions.is_dir():
+                fail(f"The submission path is not a directory: {submissions}")
+            writable_parent = submissions
+        else:
+            writable_parent = submissions.parent
+            while not writable_parent.exists() and writable_parent != writable_parent.parent:
+                writable_parent = writable_parent.parent
+            if not writable_parent.is_dir():
+                fail(f"No usable parent directory exists for: {submissions}")
+        if not os.access(writable_parent, os.W_OK | os.X_OK):
+            fail(f"The submission folder cannot be created or written: {submissions}")
+        return f"Submission ZIPs will be saved under {submissions}."
 
     if key in {"RISCV_TOOLCHAIN_PATH", "OPTIMIZATION_FLAGS"}:
         compiler, objdump = toolchain_executables(cleaned["RISCV_TOOLCHAIN_PATH"])
@@ -884,7 +946,7 @@ def simulate(name):
     if not elf.exists():
         return {"ok": False, "output": "Build failed: expected ELF was not created.\n"}
     env = settings_env()
-    result_dir = RESULTS / name
+    result_dir = project_results_directory(name)
     result_dir.mkdir(parents=True, exist_ok=True)
     for old_trace in (result_dir / "gem5_inorder.log", result_dir / "trace.out"):
         if old_trace.exists():
@@ -3816,7 +3878,7 @@ def enforce_five_stage_in_order_completion(data, configuration):
 def pipeline(name):
     folder = project_dir(name)
     source = clean_source(source_file(folder).read_text())
-    result_dir = RESULTS / name
+    result_dir = project_results_directory(name)
     minor, o3 = result_dir / "gem5_inorder.log", result_dir / "trace.out"
     configuration = project_config(folder)
     configured_cpu = configuration["cpu"]
@@ -4001,7 +4063,7 @@ def pipeline_for_display(name):
     display_limit = pipeline_display_cycle_limit()
     if data["cycles"] <= display_limit:
         return data
-    result_dir = RESULTS / name
+    result_dir = project_results_directory(name)
     result_dir.mkdir(parents=True, exist_ok=True)
     destination = (result_dir / "pipeline-full.csv").resolve()
     with destination.open("w", encoding="utf-8", newline="") as output:
@@ -4176,12 +4238,18 @@ def create_submission(projects, assignment, attachments=None, expand_loops=False
             "size": record["size"],
         })
 
-    submission_root = ROOT / "submissions"
-    submission_root.mkdir(exist_ok=True)
+    submission_root = active_submission_directory()
+    try:
+        submission_root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        fail(f"The submission folder could not be created: {error}")
     destination = (submission_root / assignment).resolve()
-    if destination.parent != submission_root.resolve():
+    if destination.parent != submission_root:
         fail("Invalid submission destination.")
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        fail(f"The assignment submission folder could not be created: {error}")
     archive_stem = submission_archive_stem(assignment)
     archive = destination / f"{archive_stem}.zip"
     submitted_at = (datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -4210,17 +4278,17 @@ def create_submission(projects, assignment, attachments=None, expand_loops=False
         bundle.writestr(".ase-submission.json",
                         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
-    relative_archive = archive.relative_to(ROOT)
+    display_archive = portable_environment_value(str(archive))
     attachment_summary = (f" and {len(decoded_attachments)} additional file(s)"
                           if decoded_attachments else "")
     normal_sections.append(
-        f"Submission ready: {relative_archive}\n"
+        f"Submission ready: {display_archive}\n"
         f"Contains {len(selected_projects)} project(s){attachment_summary}.")
-    advanced_sections.append(f"Created {relative_archive}.")
+    advanced_sections.append(f"Created {display_archive}.")
     return {"ok": True, "phase": "submission",
             "output": "\n\n".join(normal_sections),
             "advancedOutput": "\n\n".join(advanced_sections),
-            "archive": str(relative_archive),
+            "archive": str(archive),
             "projects": [entry["name"] for entry in selected_projects]}
 
 
@@ -4228,8 +4296,8 @@ def reveal_submission_folder(archive_path):
     """Open the file manager at a completed submission's directory."""
     if not isinstance(archive_path, str) or not archive_path:
         fail("The submission archive path is missing.")
-    submissions_root = (ROOT / "submissions").resolve()
-    archive = (ROOT / archive_path).resolve()
+    submissions_root = active_submission_directory()
+    archive = resolve_environment_path(archive_path)
     try:
         archive.relative_to(submissions_root)
     except ValueError:
@@ -4252,7 +4320,8 @@ def reveal_submission_folder(archive_path):
         )
     except OSError as error:
         fail(f"The submission folder could not be opened: {error}", 500)
-    return {"ok": True, "folder": str(archive.parent.relative_to(ROOT))}
+    return {"ok": True,
+            "folder": portable_environment_value(str(archive.parent))}
 
 
 def git_run(args, timeout=20, cwd=ROOT):
@@ -5074,7 +5143,13 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             url = urlparse(self.path)
             if url.path == "/api/projects":
-                return self.send_json({"projects": sorted(p.name for p in PROGRAMS.iterdir() if p.is_dir())})
+                programs = active_programs_directory()
+                if not programs.is_dir():
+                    fail(f"The configured programs folder is unavailable: {programs}", 500)
+                return self.send_json({
+                    "projects": sorted(p.name for p in programs.iterdir() if p.is_dir()),
+                    "directory": portable_environment_value(str(programs)),
+                })
             if url.path == "/api/health":
                 return self.send_json({"ok": True, "apiVersion": STUDIO_API_VERSION,
                                        "version": STUDIO_VERSION,
@@ -5212,7 +5287,7 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as error:
             return self.send_json({"error": str(error)}, 500)
 TEMPLATE = "# Add an optional .data section here.\n\n# The text section contains the instructions that the CPU runs.\n.section .text\n# Make _start visible as the point where the program begins.\n.globl _start\n_start:\n\n    # Write your RISC-V assembly here.\n\n# The End block stops the program and returns control to the simulator.\nEnd:\n    li a0, 0\n    li a7, 93\n    ecall\n"
-MAKEFILE = "ASM = ./main.s\ninclude ../demo.mk\n"
+MAKEFILE = "ASM = ./main.s\ninclude $(ASE_STUDIO_DEMO_MK)\n"
 
 if __name__ == "__main__":
     try:

@@ -32,6 +32,7 @@ let externalSyncBusy = false;
 let memoryWatches = [];
 let cpuConfigurationOpenedAs = null;
 let studioFeatures = {memoryConfiguration: false, multiIssueCpu: false};
+let configuredProgramsDirectory = "";
 
 function closeActionDialog(value) {
   const dialog = $("#message-dialog");
@@ -332,6 +333,8 @@ function highlightSourceLine(lineNumber) {
 
 async function loadProjects() {
   const data = await api("/api/projects");
+  const heading = document.querySelector(".project-panel-header h2");
+  if (heading) heading.title = `Programs folder: ${data.directory || "unknown"}`;
   $("#projects").innerHTML = data.projects.map(name =>
     `<button class="project ${name === current?.name ? "selected" : ""}" data-name="${escapeHtml(name)}">${escapeHtml(name)}</button>`
   ).join("");
@@ -1534,6 +1537,8 @@ async function openCpuConfiguration() {
 }
 
 const environmentInputs = {
+  PROGRAMS_DIRECTORY: "#env-programs-directory",
+  SUBMISSION_DIRECTORY: "#env-submission-directory",
   RISCV_TOOLCHAIN_PATH: "#env-riscv-toolchain",
   OPTIMIZATION_FLAGS: "#env-optimization-flags",
   GEM5_INSTALLATION_PATH: "#env-gem5-installation",
@@ -1623,12 +1628,46 @@ function fillEnvironmentForm(settings) {
 
 async function openEnvironmentSettings() {
   try {
-    fillEnvironmentForm(await api("/api/environment"));
+    const settings = await api("/api/environment");
+    configuredProgramsDirectory = settings.values?.PROGRAMS_DIRECTORY || "";
+    fillEnvironmentForm(settings);
     $("#environment-dialog").showModal();
   } catch (error) {
     await showActionMessage("Settings", error.message);
   }
 }
+
+function clearCurrentProject() {
+  current = null;
+  pipelineData = null;
+  memoryWatches = [];
+  savedSource = "";
+  sourceDirty = false;
+  updateDirtyIndicator();
+  $("#project-title").textContent = "Open a project";
+  $("#source-name").textContent = "Assembly Editor";
+  $("#body").value = "";
+  resetEditorHistory();
+  $("#highlight").innerHTML = "";
+  renderRegisters();
+  renderMemory();
+  $("#save").disabled = true;
+  $("#duplicate").disabled = true;
+  $("#open-with").disabled = true;
+  $("#rename").disabled = true;
+  $("#submit").disabled = true;
+  $("#run").disabled = true;
+  $("#configure").disabled = true;
+  $("#delete").disabled = true;
+  $("#reset").disabled = true;
+  $("#export-pipeline").disabled = true;
+  $("#expand-loops").disabled = true;
+  $("#cycle-prev").disabled = true;
+  $("#cycle-next").disabled = true;
+  $("#cycle-position").textContent = "Cycle —/—";
+  $("#step").disabled = true;
+}
+
 
 async function deleteCurrentProject() {
   if (!current) return;
@@ -1649,34 +1688,7 @@ async function deleteCurrentProject() {
       body: JSON.stringify({name, confirmation})
     });
     localStorage.removeItem(memoryWatchStorageKey(name));
-    current = null;
-    pipelineData = null;
-    memoryWatches = [];
-    savedSource = "";
-    sourceDirty = false;
-    updateDirtyIndicator();
-    $("#project-title").textContent = "Open a project";
-    $("#source-name").textContent = "Assembly Editor";
-    $("#body").value = "";
-    resetEditorHistory();
-    $("#highlight").innerHTML = "";
-    renderRegisters();
-    renderMemory();
-    $("#save").disabled = true;
-    $("#duplicate").disabled = true;
-    $("#open-with").disabled = true;
-    $("#rename").disabled = true;
-    $("#submit").disabled = true;
-    $("#run").disabled = true;
-    $("#configure").disabled = true;
-    $("#delete").disabled = true;
-    $("#reset").disabled = true;
-    $("#export-pipeline").disabled = true;
-    $("#expand-loops").disabled = true;
-    $("#cycle-prev").disabled = true;
-    $("#cycle-next").disabled = true;
-    $("#cycle-position").textContent = "Cycle —/—";
-    $("#step").disabled = true;
+    clearCurrentProject();
     lastNormalLog = `Deleted project ${name}. Generated results were kept.`;
     lastAdvancedLog = lastNormalLog;
     updateLog();
@@ -2031,15 +2043,26 @@ $("#environment-form").onsubmit = async event => {
     $("#env-pipeline-cycle-limit").focus();
     return;
   }
+  const programsDirectoryChanged = values.PROGRAMS_DIRECTORY.trim()
+    !== configuredProgramsDirectory.trim();
+  if (programsDirectoryChanged
+      && !await resolveUnsavedProject("change the programs folder")) return;
   try {
     const settings = await api("/api/environment", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({values})
     });
+    configuredProgramsDirectory = settings.values?.PROGRAMS_DIRECTORY || "";
     fillEnvironmentForm(settings);
     $("#environment-dialog").close();
-    lastNormalLog = "Settings saved. They will be used by the next build and simulation.";
+    if (programsDirectoryChanged) {
+      clearCurrentProject();
+      await loadProjects();
+    }
+    lastNormalLog = programsDirectoryChanged
+      ? `Settings saved. Projects are now loaded from ${configuredProgramsDirectory}.`
+      : "Settings saved. They will be used by the next build and simulation.";
     lastAdvancedLog = lastNormalLog;
     updateLog();
     showTab("output");
