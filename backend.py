@@ -1113,7 +1113,9 @@ def parse_exec_playback(lines, ordered_ticks):
         data_digits = data_match.group(1)[2:].lower() if data_match else ""
         if data_match and "MemWrite" not in op_class:
             destination = destination_register(instruction)
-            if destination:
+            # Exec traces report a computed D= value for nop/addi x0 too, but
+            # RISC-V x0 is hardwired to zero and never receives a write.
+            if destination and destination != "x0":
                 width = 16 if destination.startswith("f") else 8
                 register_deltas[cycle][destination] = (
                     "0x" + data_digits[-width:].zfill(width))
@@ -1434,7 +1436,8 @@ def parse_minor(path: Path, source_body="", include_fetch_stalls=True):
             continue
         snapshot = register_events[tick]
         changed = {register: value for register, value in snapshot.items()
-                   if previous_registers.get(register) != value}
+                   if register != "x0"
+                   and previous_registers.get(register) != value}
         previous_registers.update(snapshot)
         if changed:
             register_deltas[str(cycle_for_tick[tick])] = changed
