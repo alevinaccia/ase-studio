@@ -4570,11 +4570,28 @@ def git_metadata_path(repository):
 
 
 def gem5_checkout_is_writable(repository, build_dir):
-    """Return whether gem5 can be fetched, updated, and rebuilt by this user."""
+    """Return whether gem5 is owned and can be maintained by this user.
+
+    Git intentionally rejects repositories owned by another account unless
+    they are explicitly listed as safe directories. ASE Studio must not add
+    that trust globally on a student's behalf. Treat such checkouts as
+    administrator-managed even when group permissions or ACLs make them
+    writable, and use their existing gem5 executable without running Git.
+    """
     metadata = git_metadata_path(repository)
+    try:
+        effective_uid = os.geteuid()
+        checkout_owned = Path(repository).stat().st_uid == effective_uid
+        metadata_owned = (metadata is not None
+                          and metadata.stat().st_uid == effective_uid)
+    except (AttributeError, OSError):
+        checkout_owned = False
+        metadata_owned = False
     return bool(
         metadata is not None
         and metadata.is_dir()
+        and checkout_owned
+        and metadata_owned
         and os.access(repository, os.W_OK)
         and os.access(metadata, os.W_OK)
         and os.access(build_dir, os.W_OK)
@@ -4618,6 +4635,12 @@ def ensure_configured_gem5_branch(location, required_branch):
         # A shared binary-only installation has no branch metadata to inspect.
         return None, False
 
+    # A shared checkout may be owned by root or an administrator. Running Git
+    # in it can fail with "detected dubious ownership". Its installed
+    # executable is still valid, so leave branch management to the owner.
+    if not location.get("writable"):
+        return None, False
+
     gem5_root = Path(location["repository"])
     ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=gem5_root)
     if not ok:
@@ -4628,13 +4651,6 @@ def ensure_configured_gem5_branch(location, required_branch):
         return f"gem5 is not a Git checkout: {actual_root}", False
     if current_branch == required_branch:
         return None, False
-    if not location.get("writable"):
-        return (
-            f"The system-managed gem5 installation at {actual_root} is on "
-            f"branch '{current_branch}', but ASE Studio requires "
-            f"'{required_branch}'. Ask an administrator to switch the shared "
-            "checkout to the required branch."
-        ), False
     return ensure_repository_branch(actual_root, "gem5", required_branch)
 
 
@@ -4678,6 +4694,12 @@ def require_startup_repositories():
     elif not Path(location["buildDir"]).is_dir():
         configuration_warnings.append(
             f"The configured gem5 build directory does not exist: {location['buildDir']}")
+    elif location.get("repository") and not location.get("writable"):
+        configuration_warnings.append(
+            "The configured gem5 checkout is owned or managed by another "
+            f"account: {location['repository']}. ASE Studio will use its "
+            "existing executable, but Git branch and update checks are "
+            "disabled; ask the administrator to maintain this checkout.")
     else:
         problem, switched = ensure_configured_gem5_branch(
             location, required["gem5"])
@@ -4737,9 +4759,10 @@ def configured_gem5_checkout(values=None):
     if not location["writable"]:
         return {"managed": False, "path": str(repository),
                 "buildDir": str(build_dir), "executable": str(executable),
-                "message": ("The gem5 checkout is managed by the system and "
-                            "is not writable by the current user; update "
-                            "checking was skipped.")}
+                "message": ("The gem5 checkout is owned or managed by "
+                            "another account. Its existing executable remains "
+                            "available, but Git branch and update checks were "
+                            "skipped; ask the administrator to maintain it.")}
     ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=repository)
     if not ok or Path(top).resolve() != repository:
         return {"managed": False, "path": str(repository),
