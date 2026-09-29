@@ -4,11 +4,12 @@
 # Run ASE Studio on macOS (Apple Silicon) inside an OrbStack Ubuntu machine and
 # use it from a Mac browser. See "Running on macOS" in README.md.
 #
-# Usage: ./macos.sh [setup|start|stop|restart|status|logs|open]   (default: start)
+# Usage: ./macos.sh [setup|start|stop|restart|status|logs|open|sync]   (default: start)
 #
 # Environment overrides:
 #   ASE_MACHINE             OrbStack machine name (default: ase)
 #   ASE_STUDIO_PORT         Port served to the Mac browser (default: 8765)
+#   ASE_SYNC                0 to skip copying this checkout into the machine on start
 set -euo pipefail
 
 machine="${ASE_MACHINE:-ase}"
@@ -21,6 +22,8 @@ simulator_repository="https://github.com/cad-polito-it/ase_riscv_gem5_sim.git"
 # Paths inside the Linux machine ($HOME there is /home/<Mac user name>).
 repo="/home/${USER}/ase_riscv_gem5_sim"
 launcher="/home/${USER}/.ase-server.py"
+studio_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+studio_target="${repo}/ase_studio"
 
 in_vm() { orb -m "$machine" bash -lc "$1"; }
 
@@ -66,6 +69,24 @@ setup() {
     echo "Setup complete. Start ASE Studio with: $0 start"
 }
 
+# Copy this checkout (tracked files plus new, non-ignored ones) over the ASE
+# Studio installed in the machine, so local changes are what the server runs.
+sync_studio() {
+    if ! git -C "$studio_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Skipping sync: ${studio_dir} is not a git checkout."
+        return
+    fi
+    in_vm "[ -d ${studio_target} ]" \
+        || { echo "ASE Studio is not installed in the machine. Run: $0 setup" >&2; exit 1; }
+    echo "Syncing ASE Studio from ${studio_dir} into the machine..."
+    (
+        cd "$studio_dir"
+        git ls-files -z --cached --others --exclude-standard \
+            | while IFS= read -r -d '' file; do [[ -f "$file" ]] && printf '%s\0' "$file"; done \
+            | COPYFILE_DISABLE=1 tar --null -T - --no-xattrs --no-mac-metadata -cf -
+    ) | orb -m "$machine" tar -C "$studio_target" -xf - --no-same-owner --warning=no-unknown-keyword
+}
+
 is_running() { in_vm "systemctl is-active --quiet ${unit}"; }
 
 wait_ready() {
@@ -80,17 +101,19 @@ start() {
     require_orbstack
     machine_exists || { echo "The OrbStack machine '${machine}' does not exist. Run: $0 setup" >&2; exit 1; }
     orb start "$machine" >/dev/null 2>&1 || true
+    # Right after boot the Mac home folder can take a moment to appear in the machine.
+    in_vm "for i in \$(seq 1 30); do [ -f ${repo}/ase_studio/backend.py ] && exit 0; sleep 0.5; done; exit 1" \
+        || { echo "ASE Studio is not installed in the machine. Run: $0 setup" >&2; exit 1; }
+    [[ "${ASE_SYNC:-1}" == "0" ]] || sync_studio
     if is_running; then
         echo "ASE Studio is already running at ${url}"
+        [[ "${ASE_SYNC:-1}" == "0" ]] || echo "Frontend changes are live after a browser reload; use '$0 restart' for backend changes."
         return
     fi
     if curl -fs -m 2 -o /dev/null "${url}/api/health"; then
         echo "Port ${port} is used by another server. Stop it or set ASE_STUDIO_PORT." >&2
         exit 1
     fi
-    # Right after boot the Mac home folder can take a moment to appear in the machine.
-    in_vm "for i in \$(seq 1 30); do [ -f ${repo}/ase_studio/backend.py ] && exit 0; sleep 0.5; done; exit 1" \
-        || { echo "ASE Studio is not installed in the machine. Run: $0 setup" >&2; exit 1; }
     # Headless equivalent of native.py: the same backend, without the GTK window.
     orb -m "$machine" bash -c "cat > ${launcher}" <<EOF
 import sys
@@ -135,6 +158,7 @@ case "${1:-start}" in
     status) require_orbstack; if machine_exists && is_running; then echo "running at ${url}"; else echo "stopped"; fi ;;
     logs) require_orbstack; in_vm "journalctl -u ${unit} -f --no-pager" ;;
     open) open "$url" ;;
-    -h|--help|help) sed -n '4,11p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) echo "Usage: $0 [setup|start|stop|restart|status|logs|open]" >&2; exit 2 ;;
+    sync) require_orbstack; sync_studio ;;
+    -h|--help|help) sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "Usage: $0 [setup|start|stop|restart|status|logs|open|sync]" >&2; exit 2 ;;
 esac
