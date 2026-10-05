@@ -4,6 +4,7 @@
 """Small localhost-only backend for the experimental ASE Studio."""
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import csv
@@ -20,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import webbrowser
 import zipfile
 from bisect import bisect_left, bisect_right
@@ -1100,6 +1102,23 @@ def destination_register(instruction):
     return candidate if re.fullmatch(r"[xf]\d+", candidate) else None
 
 
+MEMORY_ACCESS_BYTES = {
+    "lb": 1, "lbu": 1, "sb": 1,
+    "lh": 2, "lhu": 2, "sh": 2,
+    "lw": 4, "sw": 4, "lwsp": 4, "swsp": 4,
+    "flw": 4, "fsw": 4, "flwsp": 4, "fswsp": 4,
+    "fld": 8, "fsd": 8, "fldsp": 8, "fsdsp": 8,
+}
+
+
+def memory_access_bytes(instruction):
+    """Return how many bytes a load/store/atomic instruction transfers."""
+    opcode = display_instruction(instruction).split(None, 1)[0].lower()
+    if opcode.startswith("c."):
+        opcode = opcode[2:]
+    return MEMORY_ACCESS_BYTES.get(opcode, 4)
+
+
 def parse_exec_playback(lines, ordered_ticks):
     register_deltas, memory_deltas = defaultdict(dict), defaultdict(dict)
     for line in lines:
@@ -1120,8 +1139,9 @@ def parse_exec_playback(lines, ordered_ticks):
                 register_deltas[cycle][destination] = (
                     "0x" + data_digits[-width:].zfill(width))
         if address_match:
-            opcode = display_instruction(instruction).split(None, 1)[0].lower()
-            memory_bits = 64 if opcode in {"fld", "fsd"} else 32
+            # Keep only the bytes actually transferred: stores report just
+            # the stored data, while loads report the sign-extended result.
+            memory_bits = memory_access_bytes(instruction) * 8
             memory_digits = memory_bits // 4
             display_value = ("0x" + data_digits[-memory_digits:].zfill(memory_digits)
                              if data_match else "—")
@@ -2150,6 +2170,183 @@ def parse_o3_debug_trace(lines, source_body=""):
             "jumps": parse_taken_jumps(lines, timeline)}
 
 
+DATA_DIRECTIVE_BYTES = {
+    ".byte": 1, ".ascii": 1, ".asciz": 1, ".string": 1,
+    ".space": 1, ".skip": 1, ".zero": 1,
+    ".half": 2, ".hword": 2, ".short": 2, ".2byte": 2,
+    ".word": 4, ".long": 4, ".int": 4, ".4byte": 4,
+    ".float": 4, ".single": 4,
+    ".dword": 8, ".quad": 8, ".8byte": 8, ".double": 8,
+}
+
+
+def split_assembly_operands(text):
+    """Split comma-separated directive operands, keeping quoted strings."""
+    operands, current, quoted, escaped = [], "", False, False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            current += character
+        elif character == '"':
+            quoted = True
+            current += character
+        elif character == ",":
+            operands.append(current.strip())
+            current = ""
+        else:
+            current += character
+    if current.strip():
+        operands.append(current.strip())
+    return operands
+
+
+def strip_assembly_comment(line):
+    """Drop a ``#`` comment unless the hash sits inside a string literal."""
+    quoted = escaped = False
+    for index, character in enumerate(line):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character == "#":
+            return line[:index]
+    return line
+
+
+def data_directive_layout(directive, operands):
+    """Return (element bytes, emitted bytes or None) for a data directive."""
+    arguments = split_assembly_operands(operands)
+    if directive == ".fill":
+        try:
+            repeat = int(arguments[0], 0)
+            size = int(arguments[1], 0) if len(arguments) > 1 else 1
+        except (IndexError, ValueError):
+            return 1, None
+        return (size if size in {1, 2, 4, 8} else 1), repeat * size
+    element = DATA_DIRECTIVE_BYTES[directive]
+    if directive in {".space", ".skip", ".zero"}:
+        try:
+            return element, int(arguments[0], 0)
+        except (IndexError, ValueError):
+            return element, None
+    if directive in {".ascii", ".asciz", ".string"}:
+        total = 0
+        for argument in arguments:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    text = ast.literal_eval(argument)
+            except (ValueError, SyntaxError):
+                return element, None
+            if not isinstance(text, str):
+                return element, None
+            total += len(text.encode("latin-1", "replace"))
+            total += directive != ".ascii"
+        return element, total
+    return element, len(arguments) * element
+
+
+def source_data_layouts(folder):
+    """Map data labels to the element width declared in the assembly source.
+
+    The ELF only records where a label starts, so ``v: .byte 1, 2, 3`` and
+    ``v: .word 0x030201`` look alike there.  Reading the directive that
+    follows each label lets the memory tab show ``v[0]``, ``v[1]``... with
+    the declared element width.  Consecutive data directives after one label
+    extend the same variable.
+    """
+    try:
+        source = source_file(folder).read_text(errors="replace")
+    except (OSError, ValueError):
+        return {}
+    label = re.compile(r"\s*([A-Za-z_.$][\w.$]*)\s*:")
+    statement_pattern = re.compile(r"(\S+)\s*(.*)")
+    layouts, pending, open_labels = {}, [], []
+    for raw_line in source.splitlines():
+        line = strip_assembly_comment(raw_line)
+        while match := label.match(line):
+            pending.append(match.group(1))
+            line = line[match.end():]
+        statement = statement_pattern.match(line.strip())
+        if not statement:
+            continue
+        directive = statement.group(1).lower()
+        if directive not in DATA_DIRECTIVE_BYTES and directive != ".fill":
+            open_labels = []
+            if not directive.startswith("."):
+                pending = []
+            continue
+        element, byte_count = data_directive_layout(directive,
+                                                    statement.group(2))
+        if pending:
+            for name in pending:
+                layouts[name] = {"elementSize": element,
+                                 "byteCount": byte_count}
+            open_labels, pending = pending, []
+            continue
+        for name in open_labels:
+            layout = layouts[name]
+            if layout["elementSize"] != element:
+                layout["elementSize"] = 1
+            layout["byteCount"] = (
+                None if layout["byteCount"] is None or byte_count is None
+                else layout["byteCount"] + byte_count)
+    return layouts
+
+
+def elf_section_headers(image):
+    """Return (byte order, section headers) from an ELF image."""
+    try:
+        if image[:4] != b"\x7fELF" or image[5] not in {1, 2}:
+            return None, []
+        elf_class = image[4]
+        endian = "<" if image[5] == 1 else ">"
+        if elf_class == 1:
+            section_offset = struct.unpack_from(endian + "I", image, 32)[0]
+            section_entry_size = struct.unpack_from(endian + "H", image, 46)[0]
+            section_count = struct.unpack_from(endian + "H", image, 48)[0]
+            section_format = endian + "IIIIIIIIII"
+        elif elf_class == 2:
+            section_offset = struct.unpack_from(endian + "Q", image, 40)[0]
+            section_entry_size = struct.unpack_from(endian + "H", image, 58)[0]
+            section_count = struct.unpack_from(endian + "H", image, 60)[0]
+            section_format = endian + "IIQQQQIIQQ"
+        else:
+            return None, []
+        if section_entry_size < struct.calcsize(section_format):
+            return None, []
+        sections = []
+        for index in range(section_count):
+            offset = section_offset + index * section_entry_size
+            fields = struct.unpack_from(section_format, image, offset)
+            sections.append({
+                "type": fields[1], "address": fields[3],
+                "offset": fields[4], "size": fields[5],
+            })
+    except (IndexError, struct.error):
+        return None, []
+    return ("little" if endian == "<" else "big"), sections
+
+
+def containing_section(sections, start, size=1):
+    return next(
+        (section for section in sections
+         if section["address"] <= start
+         and start + size <= section["address"] + section["size"]),
+        None,
+    )
+
+
 def data_symbols(folder):
     """Return watchable variables from the project's current compiled ELF.
 
@@ -2162,6 +2359,10 @@ def data_symbols(folder):
     Data placed before ``_start`` without an explicit ``.data`` directive is
     emitted into ``.text`` by the assembler.  Treat those pre-entry symbols
     as watchable data too, while excluding code labels at and after _start.
+
+    Without ``.size`` a variable extends to the next symbol or to the end of
+    its section, whichever comes first, so short byte buffers never overlap
+    their neighbours.  The source directive then provides the element width.
     """
     elf = folder / f"{artifact_stem(folder)}.elf"
     if not elf.exists():
@@ -2174,6 +2375,7 @@ def data_symbols(folder):
     try:
         result = subprocess.run([nm, "-n", "-S", str(elf)], cwd=folder, env=env,
                                 text=True, capture_output=True)
+        _byte_order, sections = elf_section_headers(elf.read_bytes())
     except OSError:
         return []
     if result.returncode:
@@ -2204,6 +2406,7 @@ def data_symbols(folder):
          if symbol["name"] == "_start"),
         None,
     )
+    layouts = source_data_layouts(folder)
     symbols = []
     for symbol in raw_symbols:
         if symbol["name"].startswith(("_", "$")):
@@ -2215,27 +2418,38 @@ def data_symbols(folder):
         if not is_data_section and not is_pre_entry_data:
             continue
         address = symbol["numericAddress"]
-        next_address = next(
-            (candidate["numericAddress"] for candidate in raw_symbols
-             if candidate["numericAddress"] > address),
-            address + 4,
-        )
-        size = symbol["declaredSize"] or max(4, next_address - address)
+        limits = [candidate["numericAddress"] for candidate in raw_symbols
+                  if candidate["numericAddress"] > address][:1]
+        section = containing_section(sections, address)
+        if section is not None:
+            limits.append(section["address"] + section["size"])
+        size = symbol["declaredSize"] or (min(limits) - address if limits else 0)
+        layout = layouts.get(symbol["name"], {})
+        if layout.get("byteCount"):
+            size = min(size, layout["byteCount"]) if size else layout["byteCount"]
+        element = layout.get("elementSize") or (4 if size % 4 == 0 else 1)
+        size = size or element
+        if size % element:
+            element = 1
         symbols.append({
             "name": symbol["name"],
             "address": f"0x{address:x}",
             "size": size,
             "kind": symbol["kind"],
+            "elementSize": element,
+            "elementCount": size // element,
         })
     return symbols
 
 
 def elf_initial_memory(folder, symbols=None):
-    """Read initial watched values from ELF sections, including zeroed BSS.
+    """Read initial watched bytes from ELF sections, including zeroed BSS.
 
     Runtime traces only contain memory transactions. Seeding playback from
     the linked image lets a student inspect a declared variable even when the
-    program never loads or stores it.
+    program never loads or stores it.  Each symbol address maps to its bytes
+    in memory order, hex-encoded, so the frontend can rebuild elements of any
+    width and apply byte or halfword stores on top of them.
     """
     elf = folder / f"{artifact_stem(folder)}.elf"
     if not elf.exists():
@@ -2245,66 +2459,25 @@ def elf_initial_memory(folder, symbols=None):
         return {}
     try:
         image = elf.read_bytes()
-        if image[:4] != b"\x7fELF" or image[5] not in {1, 2}:
-            return {}
-        elf_class = image[4]
-        endian = "<" if image[5] == 1 else ">"
-        if elf_class == 1:
-            section_offset = struct.unpack_from(endian + "I", image, 32)[0]
-            section_entry_size = struct.unpack_from(endian + "H", image, 46)[0]
-            section_count = struct.unpack_from(endian + "H", image, 48)[0]
-            section_format = endian + "IIIIIIIIII"
-        elif elf_class == 2:
-            section_offset = struct.unpack_from(endian + "Q", image, 40)[0]
-            section_entry_size = struct.unpack_from(endian + "H", image, 58)[0]
-            section_count = struct.unpack_from(endian + "H", image, 60)[0]
-            section_format = endian + "IIQQQQIIQQ"
-        else:
-            return {}
-        expected_size = struct.calcsize(section_format)
-        if section_entry_size < expected_size:
-            return {}
-        sections = []
-        for index in range(section_count):
-            offset = section_offset + index * section_entry_size
-            fields = struct.unpack_from(section_format, image, offset)
-            sections.append({
-                "type": fields[1], "address": fields[3],
-                "offset": fields[4], "size": fields[5],
-            })
-    except (OSError, IndexError, struct.error):
+    except OSError:
         return {}
+    _byte_order, sections = elf_section_headers(image)
 
     initial = {}
     for symbol in symbols:
         start = int(symbol["address"], 16)
         size = max(1, min(int(symbol.get("size", 4)), 1024 * 1024))
-        section = next(
-            (candidate for candidate in sections
-             if candidate["address"] <= start
-             and start + size <= candidate["address"] + candidate["size"]),
-            None,
-        )
+        section = containing_section(sections, start, size)
         if section is None:
             continue
-        for relative in range(0, size, 4):
-            byte_count = min(4, size - relative)
-            if section["type"] == 8:  # SHT_NOBITS (.bss/.sbss)
-                chunk = b"\0" * byte_count
-            else:
-                file_offset = (section["offset"] + start
-                               - section["address"] + relative)
-                chunk = image[file_offset:file_offset + byte_count]
-                if len(chunk) != byte_count:
-                    break
-            padded = chunk.ljust(4, b"\0")
-            byte_order = "little" if endian == "<" else "big"
-            value = int.from_bytes(padded, byteorder=byte_order, signed=False)
-            address = f"0x{start + relative:x}"
-            initial[address] = {
-                "value": f"0x{value:08x}", "access": "initial value",
-                "pc": "", "bits": 32,
-            }
+        if section["type"] == 8:  # SHT_NOBITS (.bss/.sbss)
+            chunk = bytes(size)
+        else:
+            file_offset = section["offset"] + start - section["address"]
+            chunk = image[file_offset:file_offset + size]
+            if len(chunk) != size:
+                continue
+        initial[symbol["address"]] = chunk.hex()
     return initial
 
 
@@ -2523,8 +2696,9 @@ def cache_symbol_label(address, symbols):
         end = start + int(symbol.get("size", 0))
         if start <= address < end:
             offset = address - start
-            if symbol.get("size", 0) > 4 and offset % 4 == 0:
-                return f"{symbol['name']}[{offset // 4}]"
+            element = int(symbol.get("elementSize", 4)) or 4
+            if symbol.get("elementCount", 1) > 1 and offset % element == 0:
+                return f"{symbol['name']}[{offset // element}]"
             return (symbol["name"] if not offset
                     else f"{symbol['name']}+0x{offset:x}")
     return f"0x{address:x}"
