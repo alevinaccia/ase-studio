@@ -72,9 +72,18 @@ GEM5_ISA = "RISCV"
 GEM5_VARIANT = "opt"
 OFFICIAL_GEM5_REPOSITORY = "github.com/cad-polito-it/gem5"
 REQUIRED_BRANCHES_FILE = ROOT / "ase_studio_branches.json"
+DEVELOPER_MODE_ENVIRONMENT_VARIABLE = "ASE_STUDIO_DEVELOPER"
 
-ENABLE_MEMORY_CONFIGURATION = False
-ENABLE_MULTI_ISSUE_CPU = False
+
+def developer_mode_enabled(environment=None):
+    """Return whether the opt-in developer environment variable is defined."""
+    environment = os.environ if environment is None else environment
+    return DEVELOPER_MODE_ENVIRONMENT_VARIABLE in environment
+
+
+DEVELOPER_MODE = developer_mode_enabled()
+ENABLE_MEMORY_CONFIGURATION = DEVELOPER_MODE
+ENABLE_MULTI_ISSUE_CPU = DEVELOPER_MODE
 
 _ACTIVE_COMMANDS = set()
 _ACTIVE_COMMANDS_LOCK = threading.Lock()
@@ -4896,6 +4905,13 @@ def ensure_configured_gem5_branch(location, required_branch):
 
 def require_startup_repositories():
     """Select supported parent/Studio branches and validate the gem5 branch."""
+    if DEVELOPER_MODE:
+        print(
+            "ASE Studio developer mode: startup repository alignment skipped.",
+            flush=True,
+        )
+        return {}
+
     required = required_repository_branches()
     problems = []
     switched_labels = []
@@ -5432,6 +5448,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"ok": True, "apiVersion": STUDIO_API_VERSION,
                                        "version": STUDIO_VERSION,
                                        "features": {
+                                           "developerMode": DEVELOPER_MODE,
                                            "memoryConfiguration":
                                                ENABLE_MEMORY_CONFIGURATION,
                                            "multiIssueCpu": ENABLE_MULTI_ISSUE_CPU,
@@ -5580,7 +5597,10 @@ if __name__ == "__main__":
         print(message, file=sys.stderr)
         raise SystemExit(1)
     if "--check-startup" in sys.argv:
-        print("ASE Studio repository branches are valid.")
+        if DEVELOPER_MODE:
+            print("ASE Studio startup check completed in developer mode.")
+        else:
+            print("ASE Studio repository branches are valid.")
         raise SystemExit(0)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     try:

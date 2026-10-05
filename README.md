@@ -74,6 +74,22 @@ The installer adds ASE Studio to the current user's application menu. When a
 desktop directory is available, it also creates a trusted `ASE Studio.desktop`
 shortcut there.
 
+## Developer mode
+
+Define `ASE_STUDIO_DEVELOPER` before starting ASE Studio to expose the
+experimental memory and multi-issue CPU configuration and to skip automatic
+repository branch alignment at startup:
+
+```bash
+export ASE_STUDIO_DEVELOPER=1
+./ase-studio.sh
+```
+
+The variable is presence-based, so any defined value enables the mode. A
+visible **Developer mode** badge identifies such a session. Update checks and
+their local-change safeguards remain available. Use
+`unset ASE_STUDIO_DEVELOPER` to return to the release configuration.
+
 ## License and educational use
 
 This project is intended for education and research. The repository is

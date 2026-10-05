@@ -68,6 +68,7 @@ button:disabled { opacity: .45; cursor: default; }
 .step { color: #075985; border-color: #7dd3fc; background: #e0f2fe; font-weight: 600; }
 .theme { color: #334155; background: #f1f5f9; }
 .gear { width: 31px; height: 31px; padding: 0; color: #334155; background: #f1f5f9; font-size: 17px; line-height: 29px; }
+.developer-mode-badge { padding: 5px 8px; border: 1px solid #c2410c; border-radius: 999px; color: #9a3412; background: #ffedd5; font-size: 11px; font-weight: 700; white-space: nowrap; }
 
 main {
   display: grid;
@@ -414,6 +415,7 @@ html[data-theme="dark"] .submission-projects { background: #182233; }
 html[data-theme="dark"] .submission-project:hover { background: #243249; }
 html[data-theme="dark"] .theme { background: #334155; color: #f8fafc; }
 html[data-theme="dark"] .gear { background: #334155; color: #f8fafc; }
+html[data-theme="dark"] .developer-mode-badge { color: #fed7aa; border-color: #ea580c; background: #4a2618; }
 html[data-theme="dark"] .danger { color: #fca5a5; border-color: #7f1d1d; }
 html[data-theme="dark"] .submit { color: #dcfce7; border-color: #22c55e; background: #166534; }
 html[data-theme="dark"] .update { color: #fff; border-color: #f87171; background: #b91c1c; }

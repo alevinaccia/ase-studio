@@ -31,7 +31,11 @@ let pipelineSelectTarget = null;
 let externalSyncBusy = false;
 let memoryWatches = [];
 let cpuConfigurationOpenedAs = null;
-let studioFeatures = {memoryConfiguration: false, multiIssueCpu: false};
+let studioFeatures = {
+  developerMode: false,
+  memoryConfiguration: false,
+  multiIssueCpu: false
+};
 let configuredProgramsDirectory = "";
 
 function closeActionDialog(value) {
@@ -175,9 +179,11 @@ async function loadStudioVersion() {
 
 function applyDeveloperFeatures(features) {
   studioFeatures = {
+    developerMode: features.developerMode === true,
     memoryConfiguration: features.memoryConfiguration === true,
     multiIssueCpu: features.multiIssueCpu === true
   };
+  $("#developer-mode-badge").hidden = !studioFeatures.developerMode;
   $("#cpu-model-field").hidden = !studioFeatures.multiIssueCpu;
   const multiIssueOption = $("#cpu-model").querySelector('option[value="out-of-order"]');
   multiIssueOption.hidden = !studioFeatures.multiIssueCpu;
