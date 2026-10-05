@@ -1039,21 +1039,31 @@ function saveMemoryWatches() {
   if (key) localStorage.setItem(key, JSON.stringify(memoryWatches));
 }
 
+const MEMORY_ELEMENT_NAMES = {1: "byte", 2: "halfword", 4: "word", 8: "doubleword"};
+const MEMORY_ROWS_PER_SYMBOL = 256;
+
 function availableMemorySymbols() {
   const source = pipelineData?.dataSymbols?.length
     ? pipelineData.dataSymbols : (current?.dataSymbols || []);
-  return source.map(symbol => ({
-    ...symbol,
-    address: canonicalMemoryAddress(symbol.address),
-    size: Math.max(1, Number(symbol.size) || 4)
-  })).sort((left, right) => BigInt(left.address) < BigInt(right.address)
+  return source.map(symbol => {
+    const size = Math.max(1, Number(symbol.size) || 4);
+    let elementSize = Number(symbol.elementSize);
+    if (!MEMORY_ELEMENT_NAMES[elementSize]) elementSize = size % 4 === 0 ? 4 : 1;
+    if (size % elementSize) elementSize = 1;
+    return {
+      ...symbol,
+      address: canonicalMemoryAddress(symbol.address),
+      size,
+      elementSize,
+      elementCount: size / elementSize
+    };
+  }).sort((left, right) => BigInt(left.address) < BigInt(right.address)
     ? -1 : BigInt(left.address) > BigInt(right.address) ? 1 : 0);
 }
 
 function describeMemorySymbol(symbol) {
-  if (symbol.size === 4) return "1 word";
-  if (symbol.size % 4 === 0) return `${symbol.size / 4} words`;
-  return `${symbol.size} bytes`;
+  const unit = MEMORY_ELEMENT_NAMES[symbol.elementSize];
+  return `${symbol.elementCount} ${unit}${symbol.elementCount === 1 ? "" : "s"}`;
 }
 
 function memorySymbolHue(symbol, symbols) {
@@ -1113,18 +1123,44 @@ function renderMemory() {
     return;
   }
 
-  const state = {...(pipelineData.initialMemory || current?.initialMemory || {})};
-  const changed = new Set();
+  // Replay memory one byte at a time so byte and halfword stores change only
+  // the bytes they write; each watched element is then rebuilt from bytes.
+  const initialRanges = Object.entries(pipelineData.initialMemory || current?.initialMemory || {})
+    .filter(([, hex]) => typeof hex === "string")
+    .map(([address, hex]) => ({start: Number(BigInt(address)), hex}));
+  const accessed = new Map();
   const deltas = pipelineData.memoryDeltas || {};
   for (let cycle = 1; cycle <= playbackCycle; cycle++) {
     const update = deltas[String(cycle)];
     if (!update) continue;
     Object.entries(update).forEach(([address, event]) => {
-      const canonical = canonicalMemoryAddress(address);
-      state[canonical] = event;
-      if (cycle === playbackCycle) changed.add(canonical);
+      const start = Number(BigInt(address));
+      const width = Math.max(1, Math.floor((Number(event.bits) || 32) / 8));
+      let bits = null;
+      try {
+        bits = BigInt(event.value);
+      } catch (_error) {
+        bits = null;
+      }
+      for (let offset = 0; offset < width; offset++) {
+        const previous = accessed.get(start + offset);
+        accessed.set(start + offset, {
+          value: bits === null ? (previous?.value ?? null) : Number((bits >> BigInt(8 * offset)) & 0xffn),
+          access: event.access,
+          cycle
+        });
+      }
     });
   }
+  const byteAt = address => {
+    const value = accessed.get(address)?.value;
+    if (value !== null && value !== undefined) return value;
+    const range = initialRanges.find(candidate =>
+      address >= candidate.start && address < candidate.start + candidate.hex.length / 2);
+    if (!range) return null;
+    const offset = (address - range.start) * 2;
+    return Number.parseInt(range.hex.slice(offset, offset + 2), 16);
+  };
 
   if (!memoryWatches.length) {
     $("#memory-summary").textContent = `Memory watch through cycle ${playbackCycle}`;
@@ -1132,45 +1168,47 @@ function renderMemory() {
     return;
   }
 
-  const symbolFor = address => {
-    const numeric = BigInt(address);
-    const containing = symbols.find(symbol => {
-      const start = BigInt(symbol.address);
-      return numeric >= start && numeric < start + BigInt(symbol.size);
-    });
-    if (!containing) return {label: address, symbol: null};
-    const offset = numeric - BigInt(containing.address);
-    if (containing.size > 4 && offset % 4n === 0n) {
-      return {label: `${containing.name}[${offset / 4n}]`, symbol: containing};
-    }
-    return {
-      label: offset ? `${containing.name}+0x${offset.toString(16)}` : containing.name,
-      symbol: containing
-    };
-  };
-
-  const addresses = new Set();
+  const format = $("#memory-format").value;
+  const rows = [];
+  let truncated = false;
   memoryWatches.forEach(watch => {
     const symbol = symbols.find(candidate => candidate.name === watch.name);
     if (!symbol) return;
-    const start = BigInt(symbol.address);
-    const end = start + BigInt(symbol.size);
-    addresses.add(symbol.address);
-    Object.keys(state).forEach(address => {
-      const numeric = BigInt(address);
-      if (numeric >= start && numeric < end) addresses.add(address);
-    });
+    const start = Number(BigInt(symbol.address));
+    const shown = Math.min(symbol.elementCount, MEMORY_ROWS_PER_SYMBOL);
+    truncated ||= shown < symbol.elementCount;
+    for (let index = 0; index < shown; index++) {
+      const address = start + index * symbol.elementSize;
+      let value = 0n;
+      let known = true;
+      let latest = null;
+      // RISC-V is little-endian: the highest address holds the most significant byte.
+      for (let offset = symbol.elementSize - 1; offset >= 0; offset--) {
+        const byte = byteAt(address + offset);
+        if (byte === null) known = false;
+        else value = (value << 8n) | BigInt(byte);
+        const event = accessed.get(address + offset);
+        if (event && (!latest || event.cycle > latest.cycle)) latest = event;
+      }
+      const width = symbol.elementSize * 8;
+      // Floating-point views only exist for single and double precision.
+      const elementFormat = format === "float" && width < 32 ? "hex" : format;
+      rows.push({
+        address,
+        symbol,
+        label: symbol.elementCount > 1 ? `${symbol.name}[${index}]` : symbol.name,
+        access: latest ? latest.access : known ? "initial value" : "not accessed",
+        value: known ? formatWordValue(value, elementFormat, width) : "—",
+        changed: latest?.cycle === playbackCycle
+      });
+    }
   });
-  const ordered = [...addresses].sort((left, right) =>
-    BigInt(left) < BigInt(right) ? -1 : BigInt(left) > BigInt(right) ? 1 : 0);
-  $("#memory-summary").textContent = `Memory watch through cycle ${playbackCycle} · ${ordered.length} location${ordered.length === 1 ? "" : "s"}`;
-  table.innerHTML = ordered.length ? ordered.map(address => {
-    const event = state[address];
-    const description = symbolFor(address);
-    const color = description.symbol ? " memory-symbol-color" : "";
-    const style = description.symbol ? ` style="--memory-symbol-hue:${memorySymbolHue(description.symbol, symbols)}deg"` : "";
-    const value = event ? formatWordValue(event.value, $("#memory-format").value, Number(event.bits) || 32) : "—";
-    return `<div class="memory-value${color}${changed.has(address) ? " changed" : ""}"${style}><strong class="memory-symbol-name">${escapeHtml(description.label)}</strong><span class="memory-address">${address}</span><span>${event ? event.access : "not accessed"}</span><code>${value}</code></div>`;
+  rows.sort((left, right) => left.address - right.address);
+  const limitNote = truncated ? ` · first ${MEMORY_ROWS_PER_SYMBOL} elements per vector` : "";
+  $("#memory-summary").textContent = `Memory watch through cycle ${playbackCycle} · ${rows.length} location${rows.length === 1 ? "" : "s"}${limitNote}`;
+  table.innerHTML = rows.length ? rows.map(row => {
+    const style = ` style="--memory-symbol-hue:${memorySymbolHue(row.symbol, symbols)}deg"`;
+    return `<div class="memory-value memory-symbol-color${row.changed ? " changed" : ""}"${style}><strong class="memory-symbol-name">${escapeHtml(row.label)}</strong><span class="memory-address">0x${row.address.toString(16)}</span><span>${row.access}</span><code>${row.value}</code></div>`;
   }).join("") : '<div class="memory-empty">No matching memory locations were found in this build.</div>';
 }
 
