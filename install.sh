@@ -30,7 +30,12 @@ install_system_dependencies() {
   fi
   # shellcheck disable=SC1091
   source /etc/os-release
-  case "${ID:-}" in
+  local distro="${ID:-}"
+  # Arch derivatives (CachyOS, EndeavourOS, ...) can use the Arch packages.
+  if [[ " ${ID_LIKE:-} " == *" arch "* ]]; then
+    distro="arch"
+  fi
+  case "$distro" in
     ubuntu|debian|linuxmint|pop)
       sudo apt-get update
       sudo apt-get install -y python3 python3-gi gir1.2-gtk-3.0 \
