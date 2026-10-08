@@ -862,6 +862,7 @@ async function run(stepAfterRun = false) {
         renderPipeline();
         resetPipelineViewport();
         showTab("pipeline");
+        if (stepAfterRun) showPlaybackStep();
       }
     }
   } catch (error) {
@@ -982,20 +983,67 @@ async function runStep() {
     await run(true);
     return;
   }
-  playbackCycle += 1;
-  selectedColumn = playbackCycle;
-  $("#step").textContent = playbackCycle >= pipelineData.cycles ? "Restart Step" : "Next Cycle";
-  renderPipeline();
-  showTab("pipeline");
+  movePlaybackCycle(1);
 }
 
 function movePlaybackCycle(delta) {
   if (!stepMode || !pipelineData || playbackCycle === null) return;
   playbackCycle = Math.max(1, Math.min(pipelineData.cycles, playbackCycle + delta));
+  showPlaybackStep();
+}
+
+// The current step is the most advanced instruction in the cycle (the one
+// writing back or committing when there is one); ties go to the oldest row.
+function playbackStepRow(rows, cycle) {
+  const rank = {S: 0.5, F: 1, D: 2, R: 3, I: 4, E: 5, M: 6, C: 7, W: 8};
+  let best = -1;
+  let bestRank = 0;
+  rows.forEach((row, index) => {
+    const stage = row.cycles[cycle] || "";
+    const value = Math.max(0, ...[...stage].map(marker => rank[marker] || 0));
+    if (value > bestRank) {
+      best = index;
+      bestRank = value;
+    }
+  });
+  return best;
+}
+
+function showPlaybackStep() {
+  const rows = displayedPipelineRows();
+  const row = playbackStepRow(rows, playbackCycle);
   selectedColumn = playbackCycle;
+  selectedRow = row >= 0 ? row : null;
   $("#step").textContent = playbackCycle >= pipelineData.cycles ? "Restart Step" : "Next Cycle";
-  renderPipeline();
   showTab("pipeline");
+  renderPipeline();
+  scrollPipelineToSelection();
+  highlightSourceLine(row >= 0 ? rows[row].sourceLine : null);
+}
+
+function scrollPipelineToSelection() {
+  const scroll = $("#pipeline-scroll");
+  const header = scroll.querySelector(".pipeline-header")?.offsetHeight || 0;
+  if (selectedRow !== null) {
+    const top = selectedRow * PIPELINE_ROW_HEIGHT;
+    const visibleHeight = scroll.clientHeight - header;
+    if (top < scroll.scrollTop) scroll.scrollTop = top;
+    else if (top + PIPELINE_ROW_HEIGHT > scroll.scrollTop + visibleHeight) {
+      scroll.scrollTop = top + PIPELINE_ROW_HEIGHT - visibleHeight;
+    }
+  }
+  if (selectedColumn !== null) {
+    const style = getComputedStyle(document.documentElement);
+    const fixed = ["--address-width", "--instruction-width", "--flow-width"]
+      .reduce((total, name) => total + (parseFloat(style.getPropertyValue(name)) || 0), 0);
+    const cellWidth = Number($("#cell-width").value);
+    const left = (selectedColumn - 1) * cellWidth;
+    const visibleWidth = scroll.clientWidth - fixed;
+    if (left < scroll.scrollLeft) scroll.scrollLeft = left;
+    else if (left + cellWidth > scroll.scrollLeft + visibleWidth) {
+      scroll.scrollLeft = left + cellWidth - visibleWidth;
+    }
+  }
 }
 
 function updateCycleNavigation() {
@@ -1371,6 +1419,8 @@ function jumpTargetRow(rows, address, afterCycle = 0) {
   return fallback;
 }
 
+const PIPELINE_ROW_HEIGHT = 27;
+
 function renderPipeline() {
   const data = pipelineData;
   if (!data) {
@@ -1387,7 +1437,7 @@ function renderPipeline() {
   const dynamicRows = (data.dynamicInstructions?.length ? data.dynamicInstructions : data.instructions)
     .filter(row => !row.squashed);
   const cellWidth = Number($("#cell-width").value);
-  const rowHeight = 27;
+  const rowHeight = PIPELINE_ROW_HEIGHT;
   const addressWidth = 88;
   const instructionWidth = window.innerWidth <= 700 ? 150 : 182;
   const flowWidth = window.innerWidth <= 700 ? 132 : 140;
@@ -2345,6 +2395,15 @@ document.addEventListener("keydown", event => {
     $("#search").focus();
   }
 }, true);
+document.addEventListener("keydown", event => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (!stepMode || !pipelineData || playbackCycle === null) return;
+  if (event.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  movePlaybackCycle(event.key === "ArrowLeft" ? -1 : 1);
+});
 window.aseHasUnsavedChanges = () => sourceDirty;
 
 const splitter = $("#splitter");
