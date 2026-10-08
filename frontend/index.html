@@ -7,7 +7,7 @@
 <main><aside id="project-panel"><div class="project-panel-header"><div class="sidebar-actions"><button id="new">New</button><button id="duplicate" disabled>Duplicate</button><button id="delete" class="danger" disabled>Delete</button></div><div class="projects-heading"><h2>Projects</h2><button id="new-folder" title="Create a folder to group projects">+ Folder</button></div></div><div id="projects"></div></aside><section id="work"><div id="editor-toolbar"><div class="editor-identity"><button id="open-with" disabled>Open with…</button><button id="rename" disabled>Rename</button><button id="save" disabled>Save</button><span id="project-title">Open a project</span><span id="source-name">Assembly Editor</span></div><div class="editor-tools"><label class="vim-toggle" title="Use Vim keybindings in the editor"><input id="vim-mode" type="checkbox"> Vim</label><label class="editor-font-control">Font <input id="editor-font-size" type="range" min="11" max="22" value="14"><output id="editor-font-value">14 px</output></label><input id="search" placeholder="Search (Ctrl+F)"></div></div><div class="editor-area"><div class="editor-wrap"><pre id="highlight" aria-hidden="true"></pre><textarea id="body" spellcheck="false" aria-label="Assembly source"></textarea></div></div><div id="vim-bar" hidden><span id="vim-status"></span><span id="vim-message" hidden></span><input id="vim-command" hidden spellcheck="false" autocomplete="off" aria-label="Vim command line"><span id="vim-pending"></span></div></section><div id="register-resizer" title="Drag to resize register panel"></div><aside id="register-panel"><div class="register-header"><h2>Register file</h2></div><div id="registers"><div class="register-column"><h3>Integer (x)</h3><select id="integer-register-format" aria-label="Integer register number format"><option value="hex" selected>Hexadecimal</option><option value="binary">Binary</option><option value="signed">Signed integer</option><option value="unsigned">Unsigned integer</option><option value="float">Floating-point</option></select><div id="integer-registers"></div></div><div class="register-column"><h3>Floating-point (f)</h3><select id="float-register-format" aria-label="Floating-point register number format"><option value="hex">Hexadecimal</option><option value="binary">Binary</option><option value="signed">Signed integer</option><option value="unsigned">Unsigned integer</option><option value="float" selected>Floating-point</option></select><div id="float-registers"></div></div></div></aside></main>
 <div id="splitter" title="Drag to resize the editor and output panels"></div>
 <section id="bottom">
-  <nav><button data-tab="output" class="active">Log Output</button><button data-tab="pipeline">Pipeline</button><button data-tab="memory">Memory</button></nav>
+  <nav><button data-tab="output" class="active">Log Output</button><button data-tab="pipeline">Pipeline</button><button data-tab="memory">Memory</button><button data-tab="manual" title="RISC-V instruction reference (F1)">Manual</button></nav>
   <div id="output-pane"><label class="advanced-toggle"><input id="advanced-logs" type="checkbox"> Verbose</label><pre id="output"></pre></div>
   <div id="pipeline" hidden><div class="pipeline-controls"><div class="pipeline-status"><strong id="pipeline-pc">PC —</strong><span id="pipeline-summary">No pipeline trace loaded.</span></div><div class="cycle-navigation"><button id="cycle-prev" title="Previous cycle (←)" disabled>&lt;</button><strong id="cycle-position">Cycle —/—</strong><button id="cycle-next" title="Next cycle (→)" disabled>&gt;</button></div><div class="pipeline-sizing"><label class="loop-toggle" title="Show every executed loop iteration on a new row"><input id="expand-loops" type="checkbox" checked disabled> Repeat loop rows</label><button id="cell-smaller" title="Narrower pipeline cells">−</button><label>Cell width <input id="cell-width" type="range" min="24" max="96" value="42"></label><button id="cell-larger" title="Wider pipeline cells">+</button><button id="export-pipeline" disabled>Export CSV</button></div></div><div class="pipeline-workspace"><div id="pipeline-scroll"><div id="pipeline-grid"></div></div><aside id="pipeline-diagram"></aside></div><div id="detail">Hover a pipeline cell to inspect it.</div></div>
   <div id="memory" hidden>
@@ -25,6 +25,15 @@
       </div>
       <aside id="memory-map"><div class="memory-map-title">Program memory map</div><div id="memory-map-sections"></div></aside>
     </div>
+  </div>
+  <div id="manual" hidden>
+    <div class="manual-controls">
+      <input id="manual-search" type="search" placeholder="Search instructions, e.g. lw, shift, unsigned" spellcheck="false" autocomplete="off" aria-label="Search the RISC-V manual">
+      <div id="manual-filters" class="manual-filters"></div>
+      <span id="manual-count"></span>
+      <small class="manual-hint">Ctrl/⌘-click an instruction in the editor or pipeline, or press F1, to look it up.</small>
+    </div>
+    <div class="manual-workspace"><div id="manual-list" aria-label="Instructions"></div><article id="manual-detail" aria-live="polite"></article></div>
   </div>
 </section>
 <dialog id="about-dialog"><div class="about-content">
@@ -115,4 +124,4 @@
   </fieldset>
   <div class="dialog-actions"><button type="button" id="cancel-config">Cancel</button><button type="submit" class="primary">Save configuration</button></div>
 </form></dialog>
-<script src="vim.js"></script><script src="studio.js"></script></body></html>
+<script src="vim.js"></script><script src="manual-data.js"></script><script src="manual.js"></script><script src="studio.js"></script></body></html>

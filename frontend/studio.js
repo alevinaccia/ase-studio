@@ -229,6 +229,15 @@ function markSourceEdited() {
   updateDirtyIndicator();
 }
 
+// Mnemonics come from the RISC-V manual so highlighting and the reference
+// cover the same instructions. Longest first, so fence.i wins over fence.
+const OPCODE_PATTERN = new RegExp("\\b(c[._][a-z][\\w.]*|" + RISCV_MANUAL
+  .filter(entry => entry.extension !== "Directive" && entry.extension !== "C")
+  .map(entry => entry.mnemonic)
+  .sort((a, b) => b.length - a.length)
+  .map(mnemonic => mnemonic.replace(/\./g, "\\.") + (/^(?:lr|sc|amo)/.test(mnemonic) ? "(?:\\.aqrl|\\.aq|\\.rl)?" : ""))
+  .join("|") + ")\\b", "gi");
+
 function highlightAsmLine(line) {
   const commentAt = line.indexOf("#");
   let code = commentAt >= 0 ? line.slice(0, commentAt) : line;
@@ -238,7 +247,7 @@ function highlightAsmLine(line) {
     .replace(/(^|\s)(\.[\w.]+)/g, '$1<span class="directive">$2</span>')
     .replace(/\b(x(?:[12]?\d|3[01]|0)|f(?:[12]?\d|3[01]|0)|zero|ra|sp|gp|tp|[ast]([0-9]|10|11)|ft(?:[0-9]|10|11)|fs(?:[0-9]|10|11)|fa[0-7])\b/g,
       '<span class="register">$&</span>')
-    .replace(/\b(c[._][a-z][\w.]*|add|addi|sub|sll|slli|slt|slti|sltu|sltiu|xor|xori|srl|srli|sra|srai|or|ori|and|andi|lui|auipc|lb|lbu|lh|lhu|lw|lwu|ld|sb|sh|sw|sd|mul|mulh|mulhsu|mulhu|div|divu|rem|remu|flw|fld|fsw|fsd|f(?:add|sub|mul|div|min|max)\.[sd]|f(?:madd|msub|nmsub|nmadd)\.[sd]|fsqrt\.[sd]|fsgnj[nx]?\.[sd]|f(?:eq|lt|le|class)\.[sd]|fcvt\.(?:w|wu|l|lu|s|d)\.(?:w|wu|l|lu|s|d)|fmv\.(?:x\.w|w\.x)|(?:lr|sc|amo(?:swap|add|xor|and|or|min|max|minu|maxu))\.w|beqz|bnez|beq|bne|blt|bge|bltu|bgeu|jal|jalr|j|jr|ret|call|tail|li|la|mv|neg|not|seqz|snez|sltz|sgtz|csrrw|csrrs|csrrc|csrrwi|csrrsi|csrrci|csrr|csrw|csrs|csrc|csrwi|csrsi|csrci|rdcycle|rdtime|rdinstret|fence\.i|fence|nop|ecall|ebreak|wfi|mret)\b/gi,
+    .replace(OPCODE_PATTERN,
       '<span class="opcode">$&</span>')
     .replace(/^\s*([\w.]+):/, '<span class="label">$1</span>:');
 
@@ -561,6 +570,7 @@ async function openProject(name, {skipUnsavedCheck = false} = {}) {
   lastAdvancedLog = lastNormalLog;
   updateLog();
   showTab("output");
+  refreshManualConfig();
   return true;
 }
 
@@ -907,7 +917,36 @@ function showTab(tab) {
   $("#output-pane").hidden = tab !== "output";
   $("#pipeline").hidden = tab !== "pipeline";
   $("#memory").hidden = tab !== "memory";
+  $("#manual").hidden = tab !== "manual";
   if (tab === "memory") renderMemory();
+}
+
+// Opens the manual on the instruction under `index` in `text`, or on the
+// search box when there is no word there.
+function lookUpInstruction(text, index) {
+  let start = index;
+  let end = index;
+  while (start > 0 && /[\w.]/.test(text[start - 1])) start--;
+  while (end < text.length && /[\w.]/.test(text[end])) end++;
+  const word = text.slice(start, end);
+  showTab("manual");
+  if (word) manual.open(word);
+  else manual.focusSearch();
+}
+
+async function refreshManualConfig() {
+  if (!current) {
+    manual.setConfig(null);
+    return;
+  }
+  const name = current.name;
+  try {
+    const config = await api("/api/config?name=" + encodeURIComponent(name));
+    if (current?.name !== name) return;
+    manual.setConfig({...config, cpu: studioFeatures.multiIssueCpu ? config.cpu : "in-order"});
+  } catch {
+    manual.setConfig(null);
+  }
 }
 
 function resetPipelineViewport() {
@@ -1689,7 +1728,13 @@ function renderPipeline() {
     });
     paintRows();
   };
-  grid.onclick = null;
+  grid.onclick = event => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    const cell = event.target.closest(".inst[data-row]");
+    if (!cell) return;
+    const opcode = displayRows[Number(cell.dataset.row)].instruction.trim().split(/\s+/)[0];
+    lookUpInstruction(opcode, 0);
+  };
   grid.oncontextmenu = event => {
     if (!event.target.closest("[data-row], [data-col], [data-jump-target]")) return;
     event.preventDefault();
@@ -1968,6 +2013,7 @@ function clearCurrentProject() {
   $("#cycle-next").disabled = true;
   $("#cycle-position").textContent = "Cycle —/—";
   $("#step").disabled = true;
+  manual.setConfig(null);
 }
 
 
@@ -2086,9 +2132,21 @@ const vimMode = createVimMode({
   search(query) {
     $("#search").value = query;
     syncEditor();
-  }
+  },
+  lookup: position => lookUpInstruction($("#body").value, position)
+});
+const manual = createManual({
+  pane: $("#manual"),
+  highlight: highlightAsmLine,
+  escapeHtml,
+  openCpuConfiguration
 });
 $("#body").addEventListener("keydown", event => {
+  if (event.key === "F1") {
+    event.preventDefault();
+    lookUpInstruction(event.target.value, event.target.selectionStart);
+    return;
+  }
   if (vimMode.handleKeydown(event)) return;
   if (event.key === "Tab" || event.key === "ISO_Left_Tab" || event.code === "Tab") {
     event.preventDefault();
@@ -2131,6 +2189,17 @@ $("#body").addEventListener("keydown", event => {
     const caret = start + replacement.length;
     applyEditorChange(start, end, replacement, caret, caret, viewport);
   }
+});
+$("#body").addEventListener("click", event => {
+  if (!event.ctrlKey && !event.metaKey) return;
+  lookUpInstruction(event.target.value, event.target.selectionStart);
+});
+document.addEventListener("keydown", event => {
+  if (event.key !== "F1" || event.defaultPrevented) return;
+  if (document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  showTab("manual");
+  manual.focusSearch();
 });
 $("#save").onclick = save;
 $("#duplicate").onclick = duplicateCurrentProject;
@@ -2399,6 +2468,7 @@ $("#cpu-form").onsubmit = async event => {
       body: JSON.stringify({name: current.name, config})
     });
     $("#cpu-dialog").close();
+    refreshManualConfig();
     lastNormalLog = "CPU configuration saved. It will be used on the next Run.";
     lastAdvancedLog = lastNormalLog;
     updateLog();

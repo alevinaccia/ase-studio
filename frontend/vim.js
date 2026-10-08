@@ -949,6 +949,11 @@ function createVimMode(host) {
       case ":": case "/": case "?": return openCommandLine(key);
       case "*": case "#": return searchWord(key === "#");
       case "ctrl-d": case "ctrl-u": return scrollHalfPage(key === "ctrl-d");
+      case "K":
+        resetPending();
+        render();
+        host.lookup(cursor);
+        return;
     }
     return fail();
   }
