@@ -183,6 +183,87 @@ def artifact_stem(folder: Path) -> str:
     return source_file(folder).stem
 
 
+def project_folders_file() -> Path:
+    """Store sidebar folders next to the projects without nesting them."""
+    return active_programs_directory() / ".ase-studio-folders.json"
+
+
+def validate_project_folders(value, projects):
+    """Return folders that name only existing projects, each at most once."""
+    if not isinstance(value, list):
+        fail("Invalid project folders.")
+    folders, names, placed = [], set(), set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            fail("Invalid project folders.")
+        try:
+            name = validate_project_name(entry.get("name"))
+        except ValueError:
+            fail("Enter a non-empty folder name without '/'.")
+        if name in names:
+            fail(f'A folder named "{name}" already exists.')
+        members = entry.get("projects", [])
+        if not isinstance(members, list):
+            fail("Invalid project folders.")
+        kept = [member for member in members
+                if isinstance(member, str) and member in projects
+                and member not in placed]
+        placed.update(kept)
+        names.add(name)
+        folders.append({"name": name, "projects": kept})
+    return folders
+
+
+def load_project_folders(projects):
+    path = project_folders_file()
+    try:
+        return validate_project_folders(
+            json.loads(path.read_text()).get("folders", []), set(projects))
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def save_project_folders(value):
+    programs = active_programs_directory()
+    projects = {p.name for p in programs.iterdir() if p.is_dir()}
+    folders = validate_project_folders(value, projects)
+    path = project_folders_file()
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps({"folders": folders}, indent=2) + "\n")
+    temporary.replace(path)
+    return {"ok": True, "folders": folders}
+
+
+def update_project_folders(old_name: str, new_name=None, after=None):
+    """Follow a project rename, copy, or deletion in the folder file.
+
+    With ``after``, ``new_name`` is added next to that project instead of
+    replacing ``old_name``.
+    """
+    path = project_folders_file()
+    if not path.exists():
+        return
+    try:
+        folders = json.loads(path.read_text()).get("folders", [])
+    except (OSError, ValueError, AttributeError):
+        return
+    changed = False
+    for folder in folders:
+        members = folder.get("projects") if isinstance(folder, dict) else None
+        if not isinstance(members, list) or (after or old_name) not in members:
+            continue
+        index = members.index(after or old_name)
+        if after:
+            members.insert(index + 1, new_name)
+        elif new_name:
+            members[index] = new_name
+        else:
+            members.pop(index)
+        changed = True
+    if changed:
+        path.write_text(json.dumps({"folders": folders}, indent=2) + "\n")
+
+
 def rename_project(old_name: str, new_name: str):
     source = project_dir(old_name)
     destination = project_path(new_name)
@@ -197,6 +278,7 @@ def rename_project(old_name: str, new_name: str):
     source.rename(destination)
     if old_results.is_dir():
         old_results.rename(new_results)
+    update_project_folders(old_name, new_name)
     return {"ok": True, "name": new_name}
 
 
@@ -211,6 +293,7 @@ def duplicate_project(source_name: str, new_name: str):
         destination,
         ignore=shutil.ignore_patterns("*.elf", "*.dump", "*.o", "__pycache__"),
     )
+    update_project_folders(source_name, new_name, after=source_name)
     return {"ok": True, "name": new_name}
 
 
@@ -5446,8 +5529,10 @@ class Handler(SimpleHTTPRequestHandler):
                 programs = active_programs_directory()
                 if not programs.is_dir():
                     fail(f"The configured programs folder is unavailable: {programs}", 500)
+                projects = sorted(p.name for p in programs.iterdir() if p.is_dir())
                 return self.send_json({
-                    "projects": sorted(p.name for p in programs.iterdir() if p.is_dir()),
+                    "projects": projects,
+                    "folders": load_project_folders(projects),
                     "directory": portable_environment_value(str(programs)),
                 })
             if url.path == "/api/health":
@@ -5527,6 +5612,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if destination.exists(): fail("A project with that name already exists.")
                 destination.mkdir(); (destination / "main.s").write_text(TEMPLATE); (destination / "Makefile").write_text(MAKEFILE)
                 return self.send_json({"ok": True, "name": name})
+            if self.path == "/api/folders":
+                return self.send_json(save_project_folders(data.get("folders")))
             if self.path == "/api/projects/duplicate":
                 return self.send_json(duplicate_project(
                     data.get("name"), data.get("newName")))
@@ -5597,6 +5684,7 @@ class Handler(SimpleHTTPRequestHandler):
                 fail("Project deletion was not confirmed.")
             folder = project_dir(name)
             shutil.rmtree(folder)
+            update_project_folders(name)
             return self.send_json({"ok": True})
         except ValueError as error:
             message, status = error.args[0]

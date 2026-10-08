@@ -28,6 +28,7 @@ let messageDialogConfirmValue = true;
 let messageDialogAlternateValue = null;
 let messageDialogTrimInput = true;
 let pipelineSelectTarget = null;
+let projectFolders = [];
 let externalSyncBusy = false;
 let memoryWatches = [];
 let cpuConfigurationOpenedAs = null;
@@ -359,12 +360,128 @@ async function loadProjects() {
   const data = await api("/api/projects");
   const heading = document.querySelector(".project-panel-header h2");
   if (heading) heading.title = `Programs folder: ${data.directory || "unknown"}`;
-  $("#projects").innerHTML = data.projects.map(name =>
-    `<button class="project ${name === current?.name ? "selected" : ""}" data-name="${escapeHtml(name)}">${escapeHtml(name)}</button>`
-  ).join("");
-  document.querySelectorAll(".project").forEach(button => {
-    button.onclick = () => openProject(button.dataset.name);
+  projectFolders = data.folders || [];
+  const collapsed = collapsedProjectFolders();
+  const grouped = new Set(projectFolders.flatMap(folder => folder.projects));
+  const projectButton = name =>
+    `<button class="project ${name === current?.name ? "selected" : ""}" data-name="${escapeHtml(name)}" draggable="true">${escapeHtml(name)}</button>`;
+  const folders = projectFolders.map((folder, index) => {
+    const isCollapsed = collapsed.has(folder.name);
+    const items = folder.projects.map(projectButton).join("")
+      || '<div class="project-folder-empty">Drag projects here</div>';
+    return `<div class="project-folder${isCollapsed ? " collapsed" : ""}" data-folder-drop="${index}">`
+      + `<div class="project-folder-header"><button class="project-folder-toggle" data-folder-toggle="${index}" aria-expanded="${!isCollapsed}"><span class="project-folder-chevron">▾</span><span class="project-folder-name">${escapeHtml(folder.name)}</span><span class="project-folder-count">${folder.projects.length}</span></button>`
+      + `<button class="project-folder-action" data-folder-rename="${index}" title="Rename folder" aria-label="Rename folder ${escapeHtml(folder.name)}">✎</button>`
+      + `<button class="project-folder-action" data-folder-delete="${index}" title="Delete folder (its projects are kept)" aria-label="Delete folder ${escapeHtml(folder.name)}">×</button></div>`
+      + `<div class="project-folder-items">${items}</div></div>`;
+  }).join("");
+  const loose = data.projects.filter(name => !grouped.has(name)).map(projectButton).join("");
+  $("#projects").innerHTML = folders + loose;
+}
+
+// Folders only group the sidebar; projects stay flat in the programs folder.
+const COLLAPSED_FOLDERS_KEY = "ase-studio-collapsed-folders";
+
+function collapsedProjectFolders() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLLAPSED_FOLDERS_KEY) || "[]");
+    return new Set(Array.isArray(saved) ? saved : []);
+  } catch (_error) {
+    return new Set();
+  }
+}
+
+function setProjectFolderCollapsed(name, collapsed) {
+  const folders = collapsedProjectFolders();
+  if (collapsed) folders.add(name);
+  else folders.delete(name);
+  try {
+    localStorage.setItem(COLLAPSED_FOLDERS_KEY, JSON.stringify([...folders]));
+  } catch (_error) {
+    // Collapsing still works for this session.
+  }
+}
+
+async function saveProjectFolders(folders, title) {
+  try {
+    await api("/api/folders", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({folders})
+    });
+  } catch (error) {
+    await showActionMessage(title, error.message);
+  }
+  await loadProjects();
+}
+
+function copyProjectFolders() {
+  return projectFolders.map(folder => ({name: folder.name, projects: [...folder.projects]}));
+}
+
+async function createProjectFolder() {
+  const name = await actionDialog({
+    title: "New folder",
+    message: "Group projects in the sidebar. Drag projects into the folder to move them.",
+    inputLabel: "Folder name",
+    confirmLabel: "Create",
+    cancelLabel: "Cancel"
   });
+  if (!name) return;
+  await saveProjectFolders([...copyProjectFolders(), {name, projects: []}], "New folder");
+}
+
+async function renameProjectFolder(index) {
+  const folders = copyProjectFolders();
+  const oldName = folders[index]?.name;
+  if (oldName === undefined) return;
+  const name = await actionDialog({
+    title: "Rename folder",
+    message: "Enter a new name for this folder.",
+    inputLabel: "Folder name",
+    inputValue: oldName,
+    confirmLabel: "Rename",
+    cancelLabel: "Cancel"
+  });
+  if (!name || name === oldName) return;
+  folders[index].name = name;
+  if (collapsedProjectFolders().has(oldName)) {
+    setProjectFolderCollapsed(oldName, false);
+    setProjectFolderCollapsed(name, true);
+  }
+  await saveProjectFolders(folders, "Rename folder");
+}
+
+async function deleteProjectFolder(index) {
+  const folders = copyProjectFolders();
+  const folder = folders[index];
+  if (!folder) return;
+  const count = folder.projects.length;
+  const confirmed = await actionDialog({
+    title: "Delete folder",
+    message: count
+      ? `Delete folder "${folder.name}"? Its ${count} project${count === 1 ? "" : "s"} will move back to the top level; no project is deleted.`
+      : `Delete the empty folder "${folder.name}"?`,
+    confirmLabel: "Delete folder",
+    cancelLabel: "Cancel",
+    danger: true
+  });
+  if (confirmed !== true) return;
+  folders.splice(index, 1);
+  setProjectFolderCollapsed(folder.name, false);
+  await saveProjectFolders(folders, "Delete folder");
+}
+
+async function moveProjectToFolder(name, target) {
+  const folders = copyProjectFolders();
+  const source = folders.findIndex(folder => folder.projects.includes(name));
+  if (source === target) return;
+  if (source >= 0) folders[source].projects = folders[source].projects.filter(project => project !== name);
+  if (target !== null) {
+    folders[target].projects.push(name);
+    setProjectFolderCollapsed(folders[target].name, false);
+  }
+  await saveProjectFolders(folders, "Move project");
 }
 
 async function resolveUnsavedProject(action) {
@@ -2061,6 +2178,63 @@ $("#close-about").onclick = () => $("#about-dialog").close();
 $("#about-dialog").onclick = event => {
   if (event.target === $("#about-dialog")) $("#about-dialog").close();
 };
+$("#new-folder").onclick = createProjectFolder;
+const PROJECT_DRAG_TYPE = "application/x-ase-project";
+const projectList = $("#projects");
+const projectDropTarget = target => {
+  const folder = target.closest("[data-folder-drop]");
+  return folder ? Number(folder.dataset.folderDrop) : null;
+};
+const clearProjectDropTarget = () => [projectList, ...projectList.querySelectorAll(".drop-target")]
+  .forEach(element => element.classList.remove("drop-target"));
+projectList.onclick = event => {
+  const toggle = event.target.closest("[data-folder-toggle]");
+  if (toggle) {
+    const folder = projectFolders[Number(toggle.dataset.folderToggle)];
+    const element = toggle.closest(".project-folder");
+    const collapsed = !element.classList.contains("collapsed");
+    element.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    if (folder) setProjectFolderCollapsed(folder.name, collapsed);
+    return;
+  }
+  const rename = event.target.closest("[data-folder-rename]");
+  if (rename) return renameProjectFolder(Number(rename.dataset.folderRename));
+  const remove = event.target.closest("[data-folder-delete]");
+  if (remove) return deleteProjectFolder(Number(remove.dataset.folderDelete));
+  const project = event.target.closest(".project");
+  if (project) openProject(project.dataset.name);
+};
+projectList.addEventListener("dragstart", event => {
+  const project = event.target.closest(".project");
+  if (!project) return;
+  event.dataTransfer.setData(PROJECT_DRAG_TYPE, project.dataset.name);
+  event.dataTransfer.effectAllowed = "move";
+  project.classList.add("dragging");
+});
+projectList.addEventListener("dragend", event => {
+  event.target.closest(".project")?.classList.remove("dragging");
+  clearProjectDropTarget();
+});
+projectList.addEventListener("dragover", event => {
+  if (!event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  const target = event.target.closest("[data-folder-drop]") || projectList;
+  if (target.classList.contains("drop-target")) return;
+  clearProjectDropTarget();
+  target.classList.add("drop-target");
+});
+projectList.addEventListener("dragleave", event => {
+  if (!projectList.contains(event.relatedTarget)) clearProjectDropTarget();
+});
+projectList.addEventListener("drop", event => {
+  const name = event.dataTransfer.getData(PROJECT_DRAG_TYPE);
+  clearProjectDropTarget();
+  if (!name) return;
+  event.preventDefault();
+  moveProjectToFolder(name, projectDropTarget(event.target));
+});
 $("#new").onclick = async () => {
   if (!await resolveUnsavedProject("create a new project")) return;
   const name = await actionDialog({

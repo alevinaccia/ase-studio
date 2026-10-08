@@ -82,11 +82,31 @@ aside { background: #fff; border-right: 1px solid var(--line); padding: 12px; ov
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
 #project-panel { display: flex; flex-direction: column; overflow: hidden; }
 .project-panel-header { flex: none; background: inherit; }
-#projects { min-height: 0; overflow: auto; margin: 0 -6px; padding: 0 6px 4px; }
+#projects { flex: 1; min-height: 0; overflow: auto; margin: 0 -6px; padding: 4px 6px 12px; display: flex; flex-direction: column; gap: 3px; border-radius: 6px; }
+#projects.drop-target { background: #f1f5f9; }
 .sidebar-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin-bottom: 14px; }
 .sidebar-actions button { min-width: 0; padding: 6px 3px; font-size: 12px; }
-.project { display: block; border: 0; background: transparent; width: 100%; text-align: left; padding: 8px; }
-.project.selected { background: #e8f1ff; color: #0759b3; font-weight: 600; outline: 2px solid var(--blue); }
+.projects-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.projects-heading h2 { margin: 0; }
+.projects-heading button { padding: 3px 8px; font-size: 11px; }
+.project { display: block; flex: none; border: 0; border-radius: 6px; background: transparent; width: 100%; text-align: left; padding: 8px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project:hover { background: #f1f5f9; }
+.project.selected { background: #e8f1ff; color: #0759b3; font-weight: 600; outline: 2px solid var(--blue); outline-offset: -2px; }
+.project.dragging { opacity: .45; }
+.project-folder { flex: none; border-radius: 6px; }
+.project-folder.drop-target { background: #e8f1ff; box-shadow: inset 0 0 0 2px var(--blue); }
+.project-folder-header { display: flex; align-items: center; gap: 2px; }
+.project-folder-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: transparent; padding: 7px 8px; text-align: left; font-weight: 600; }
+.project-folder-chevron { flex: none; width: 12px; color: var(--muted); transition: transform .12s; }
+.project-folder.collapsed .project-folder-chevron { transform: rotate(-90deg); }
+.project-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-folder-count { flex: none; color: var(--muted); font-size: 11px; font-weight: 400; }
+.project-folder-action { flex: none; width: 24px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--muted); opacity: 0; }
+.project-folder-header:hover .project-folder-action, .project-folder-action:focus-visible { opacity: 1; }
+.project-folder-action:hover { color: inherit; background: #f1f5f9; }
+.project-folder-items { display: flex; flex-direction: column; gap: 3px; margin-left: 14px; padding: 2px 0 4px 8px; border-left: 1px solid var(--line); }
+.project-folder.collapsed .project-folder-items { display: none; }
+.project-folder-empty { padding: 6px 12px; color: var(--muted); font-size: 12px; font-style: italic; }
 
 #work { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; overflow: hidden; }
 #editor-toolbar { flex: 0 0 40px; border-bottom: 1px solid var(--line); padding: 5px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--muted); }
@@ -433,6 +453,9 @@ html[data-theme="dark"] .reset { color: #fed7aa; border-color: #9a3412; backgrou
 html[data-theme="dark"] .step { color: #bae6fd; border-color: #075985; background: #12344a; }
 html[data-theme="dark"] .primary { color: #07111f; background: #60a5fa; border-color: #60a5fa; }
 html[data-theme="dark"] .project.selected { background: #17365f; color: #bfdbfe; }
+html[data-theme="dark"] .project-folder-toggle, html[data-theme="dark"] .project-folder-action { background: transparent; }
+html[data-theme="dark"] .project:not(.selected):hover, html[data-theme="dark"] .project-folder-action:hover, html[data-theme="dark"] #projects.drop-target { background: #1e293b; }
+html[data-theme="dark"] .project-folder.drop-target { background: #17365f; }
 html[data-theme="dark"] .editor-wrap textarea { caret-color: #f8fafc; }
 html[data-theme="dark"] .editor-wrap textarea.vim-block::selection { background: rgba(248, 250, 252, .4); }
 html[data-theme="dark"] #vim-command { color: #e5edf7; }
