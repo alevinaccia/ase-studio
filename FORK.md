@@ -7,6 +7,9 @@
 - an optional Vim mode for the editor
 - running on Apple Silicon Macs via OrbStack (`./macos.sh`)
 - downloading the submission ZIP when its folder cannot be opened
+- a searchable RISC-V manual tab, linked from the editor (Ctrl/⌘-click, F1,
+  Vim `K`) and the pipeline, that shows each instruction's timing under the
+  project's CPU configuration
 
 `VERSION` reads `<upstream version>+av.<n>`, so a build from this fork is never
 mistaken for an official release. Bump `<n>` when you add something, and reset
