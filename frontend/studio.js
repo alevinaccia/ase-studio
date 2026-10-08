@@ -37,6 +37,24 @@ let studioFeatures = {
   multiIssueCpu: false
 };
 let configuredProgramsDirectory = "";
+let memoryPopoutWindow = null;
+const memoryWindowChannel = "BroadcastChannel" in window
+  ? new BroadcastChannel("ase-studio-memory-window") : null;
+
+if (memoryWindowChannel) {
+  memoryWindowChannel.onmessage = event => {
+    const message = event.data;
+    if (message?.type === "memory-request-state") {
+      publishMemoryWindowState();
+      return;
+    }
+    if (message?.type !== "memory-action") return;
+    if (message.action === "add") addMemoryWatch(message.name);
+    else if (message.action === "remove") removeMemoryWatch(message.index);
+    else if (message.action === "clear") clearMemoryWatches();
+    else if (message.action === "format") setMemoryFormat(message.value);
+  };
+}
 
 function closeActionDialog(value) {
   const dialog = $("#message-dialog");
@@ -1116,6 +1134,68 @@ function renderMemoryMap() {
   }).join("");
 }
 
+function publishMemoryWindowState() {
+  if (!memoryWindowChannel) return;
+  const symbol = $("#memory-symbol");
+  memoryWindowChannel.postMessage({
+    type: "memory-state",
+    project: current?.name || "",
+    theme: document.documentElement.dataset.theme,
+    symbolOptionsHtml: symbol.innerHTML,
+    symbolValue: symbol.value,
+    symbolDisabled: symbol.disabled,
+    addDisabled: $("#memory-symbol-form button").disabled,
+    clearDisabled: $("#memory-watch-clear").disabled,
+    format: $("#memory-format").value,
+    watchesHtml: $("#memory-watch-list").innerHTML,
+    summary: $("#memory-summary").textContent,
+    tableHtml: $("#memory-table").innerHTML,
+    mapHtml: $("#memory-map-sections").innerHTML
+  });
+}
+
+function addMemoryWatch(name) {
+  if (!current || !name) return;
+  if (!availableMemorySymbols().some(symbol => symbol.name === name)) return;
+  if (!memoryWatches.some(watch => watch.type === "symbol" && watch.name === name)) {
+    memoryWatches.push({type: "symbol", name});
+    saveMemoryWatches();
+  }
+  renderMemory();
+}
+
+function removeMemoryWatch(index) {
+  const selected = Number(index);
+  if (!Number.isInteger(selected) || selected < 0 || selected >= memoryWatches.length) return;
+  memoryWatches.splice(selected, 1);
+  saveMemoryWatches();
+  renderMemory();
+}
+
+function clearMemoryWatches() {
+  memoryWatches = [];
+  saveMemoryWatches();
+  renderMemory();
+}
+
+function setMemoryFormat(value) {
+  const formats = new Set(["hex", "binary", "signed", "unsigned", "float"]);
+  if (!formats.has(value)) return;
+  $("#memory-format").value = value;
+  localStorage.setItem("ase-studio-memory-format", value);
+  renderMemory();
+}
+
+async function openMemoryWindow() {
+  memoryPopoutWindow = window.open(
+    "memory-window.html", "ase-studio-memory", "popup,width=1050,height=720");
+  if (!memoryPopoutWindow) {
+    await showActionMessage("Open memory window", "The separate memory window was blocked.");
+    return;
+  }
+  memoryPopoutWindow.focus();
+}
+
 function renderMemory() {
   const table = $("#memory-table");
   const symbols = availableMemorySymbols();
@@ -1126,6 +1206,7 @@ function renderMemory() {
       ? "Run a trace to inspect the watched memory locations."
       : "Add a variable or vector to the watch list.";
     table.innerHTML = '<div class="memory-empty">Memory values appear here after a successful run.</div>';
+    publishMemoryWindowState();
     return;
   }
 
@@ -1171,6 +1252,7 @@ function renderMemory() {
   if (!memoryWatches.length) {
     $("#memory-summary").textContent = `Memory watch through cycle ${playbackCycle}`;
     table.innerHTML = '<div class="memory-empty">The watch list is empty. Add a variable or vector above.</div>';
+    publishMemoryWindowState();
     return;
   }
 
@@ -1216,6 +1298,7 @@ function renderMemory() {
     const style = ` style="--memory-symbol-hue:${memorySymbolHue(row.symbol, symbols)}deg"`;
     return `<div class="memory-value memory-symbol-color${row.changed ? " changed" : ""}"${style}><strong class="memory-symbol-name">${escapeHtml(row.label)}</strong><span class="memory-address">0x${row.address.toString(16)}</span><span>${row.access}</span><code>${row.value}</code></div>`;
   }).join("") : '<div class="memory-empty">No matching memory locations were found in this build.</div>';
+  publishMemoryWindowState();
 }
 
 function expandedLoopView() {
@@ -1873,10 +1956,7 @@ $("#float-register-format").onchange = event => {
   renderRegisters();
 };
 $("#memory-format").value = localStorage.getItem("ase-studio-memory-format") || "hex";
-$("#memory-format").onchange = event => {
-  localStorage.setItem("ase-studio-memory-format", event.target.value);
-  renderMemory();
-};
+$("#memory-format").onchange = event => setMemoryFormat(event.target.value);
 setEditorFontSize(localStorage.getItem("ase-studio-editor-font-size") || 14);
 $("#editor-font-size").oninput = event => setEditorFontSize(event.target.value);
 $("#theme-toggle").onclick = () => {
@@ -1884,6 +1964,7 @@ $("#theme-toggle").onclick = () => {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("ase-studio-theme", theme);
   updateThemeButton();
+  publishMemoryWindowState();
 };
 updateThemeButton();
 $("#about-button").onclick = () => $("#about-dialog").showModal();
@@ -1928,26 +2009,15 @@ $("#message-dialog").addEventListener("cancel", event => {
 document.querySelectorAll("#bottom nav button").forEach(button => button.onclick = () => showTab(button.dataset.tab));
 $("#memory-symbol-form").onsubmit = event => {
   event.preventDefault();
-  const name = $("#memory-symbol").value;
-  if (!current || !name) return;
-  if (!memoryWatches.some(watch => watch.type === "symbol" && watch.name === name)) {
-    memoryWatches.push({type: "symbol", name});
-    saveMemoryWatches();
-  }
-  renderMemory();
+  addMemoryWatch($("#memory-symbol").value);
 };
 $("#memory-watch-list").onclick = event => {
   const button = event.target.closest("[data-memory-watch-remove]");
   if (!button) return;
-  memoryWatches.splice(Number(button.dataset.memoryWatchRemove), 1);
-  saveMemoryWatches();
-  renderMemory();
+  removeMemoryWatch(button.dataset.memoryWatchRemove);
 };
-$("#memory-watch-clear").onclick = () => {
-  memoryWatches = [];
-  saveMemoryWatches();
-  renderMemory();
-};
+$("#memory-watch-clear").onclick = clearMemoryWatches;
+$("#memory-popout").onclick = openMemoryWindow;
 $("#cell-width").oninput = () => pipelineData && renderPipeline();
 $("#cell-smaller").onclick = () => adjustCellWidth(-6);
 $("#cell-larger").onclick = () => adjustCellWidth(6);
