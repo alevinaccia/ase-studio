@@ -85,6 +85,27 @@ sync_studio() {
             | while IFS= read -r -d '' file; do [[ -f "$file" ]] && printf '%s\0' "$file"; done \
             | COPYFILE_DISABLE=1 tar --null -T - --no-xattrs --no-mac-metadata -cf -
     ) | orb -m "$machine" tar -C "$studio_target" -xf - --no-same-owner --warning=no-unknown-keyword
+    ignore_synced_extras
+}
+
+# Files copied from this checkout that the machine's checkout does not track
+# would block the in-app update when it checks out a release adding them. List
+# them in that checkout's local exclude file: Git overwrites ignored files.
+ignore_synced_extras() {
+    git -C "$studio_dir" ls-files --cached --others --exclude-standard \
+        | orb -m "$machine" bash -c '
+            cd "$1" || exit 0
+            exclude=$(git rev-parse --git-path info/exclude) || exit 0
+            mkdir -p "$(dirname "$exclude")"
+            tracked=$(mktemp)
+            git ls-files | LC_ALL=C sort > "$tracked"
+            {
+                sed "/^# macos.sh sync start$/,/^# macos.sh sync end$/d" "$exclude" 2>/dev/null
+                echo "# macos.sh sync start"
+                LC_ALL=C sort | LC_ALL=C comm -23 - "$tracked" | sed "s|^|/|"
+                echo "# macos.sh sync end"
+            } > "$exclude.tmp" && mv "$exclude.tmp" "$exclude"
+            rm -f "$tracked"' _ "$studio_target"
 }
 
 is_running() { in_vm "systemctl is-active --quiet ${unit}"; }
