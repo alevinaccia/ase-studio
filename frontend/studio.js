@@ -1364,6 +1364,9 @@ function availableMemorySymbols() {
     const size = Math.max(1, Number(symbol.size) || 4);
     let elementSize = Number(symbol.elementSize);
     if (!MEMORY_ELEMENT_NAMES[elementSize]) elementSize = size % 4 === 0 ? 4 : 1;
+    // .space/.skip/.zero reserve raw bytes, so view them as words rather
+    // than byte by byte (memoryDisplayLayout widens them to doubles).
+    if (symbol.untypedStorage && size % 4 === 0) elementSize = 4;
     if (size % elementSize) elementSize = 1;
     return {
       ...symbol,
