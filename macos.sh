@@ -4,12 +4,17 @@
 # Run ASE Studio on macOS (Apple Silicon) inside an OrbStack Ubuntu machine and
 # use it from a Mac browser. See "Running on macOS" in README.md.
 #
-# Usage: ./macos.sh [setup|start|stop|restart|status|logs|open|sync]   (default: start)
+# Usage: ./macos.sh [setup|start|stop|restart|status|logs|open|sync|update]   (default: start)
+#
+# start also updates the simulator and gem5 from upstream (rebuilding gem5 when
+# its executable is older than its source) and reports upstream ASE Studio
+# commits this checkout does not have yet. update does only that.
 #
 # Environment overrides:
 #   ASE_MACHINE             OrbStack machine name (default: ase)
 #   ASE_STUDIO_PORT         Port served to the Mac browser (default: 8765)
 #   ASE_SYNC                0 to skip copying this checkout into the machine on start
+#   ASE_UPDATE              0 to skip the upstream updates and checks on start
 set -euo pipefail
 
 machine="${ASE_MACHINE:-ase}"
@@ -108,6 +113,41 @@ ignore_synced_extras() {
             rm -f "$tracked"' _ "$studio_target"
 }
 
+# Pull the simulator and gem5, and rebuild gem5 whenever its executable is
+# older than its source. This runs here rather than in the app so a long
+# rebuild is visible and cannot be cut short by closing the browser or server.
+update_engine() {
+    echo "Updating the simulator and gem5 (a gem5 rebuild can take a while)..."
+    in_vm "cd ${repo} && ASE_STUDIO_HOST_ROOT=${repo} /usr/bin/python3 -u -m ase_studio.backend --update-engine" \
+        || echo "Warning: the simulator or gem5 update did not complete; see the messages above." >&2
+}
+
+# This checkout replaces the machine's ASE Studio on every sync, so upstream
+# ASE Studio fixes only arrive by rebasing it. Report what is missing; the
+# rebase itself is left to the user because it can conflict.
+check_upstream() {
+    git -C "$studio_dir" remote get-url upstream >/dev/null 2>&1 || {
+        echo "Note: no 'upstream' remote, so upstream ASE Studio updates are not checked." >&2
+        echo "      Add it with: git -C \"${studio_dir}\" remote add upstream https://github.com/cad-polito-it/ase-studio.git" >&2
+        return
+    }
+    if ! git -C "$studio_dir" fetch --quiet upstream 2>/dev/null; then
+        echo "Warning: could not fetch upstream ASE Studio; its updates were not checked." >&2
+        return
+    fi
+    local missing
+    missing=$(git -C "$studio_dir" rev-list --count HEAD..upstream/main)
+    if (( missing > 0 )); then
+        echo "Upstream ASE Studio has ${missing} commit(s) this checkout does not include:"
+        git -C "$studio_dir" log --oneline --no-decorate -10 HEAD..upstream/main | sed 's/^/  /'
+        (( missing > 10 )) && echo "  ..."
+        echo "Rebase onto them (see FORK.md), then run '$0 restart':"
+        echo "  git -C \"${studio_dir}\" rebase upstream/main"
+    else
+        echo "ASE Studio includes every upstream commit."
+    fi
+}
+
 is_running() { in_vm "systemctl is-active --quiet ${unit}"; }
 
 wait_ready() {
@@ -126,6 +166,10 @@ start() {
     in_vm "for i in \$(seq 1 30); do [ -f ${repo}/ase_studio/backend.py ] && exit 0; sleep 0.5; done; exit 1" \
         || { echo "ASE Studio is not installed in the machine. Run: $0 setup" >&2; exit 1; }
     [[ "${ASE_SYNC:-1}" == "0" ]] || sync_studio
+    if [[ "${ASE_UPDATE:-1}" != "0" ]]; then
+        check_upstream
+        update_engine
+    fi
     if is_running; then
         echo "ASE Studio is already running at ${url}"
         [[ "${ASE_SYNC:-1}" == "0" ]] || echo "Frontend changes are live after a browser reload; use '$0 restart' for backend changes."
@@ -180,6 +224,7 @@ case "${1:-start}" in
     logs) require_orbstack; in_vm "journalctl -u ${unit} -f --no-pager" ;;
     open) open "$url" ;;
     sync) require_orbstack; sync_studio ;;
-    -h|--help|help) sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) echo "Usage: $0 [setup|start|stop|restart|status|logs|open|sync]" >&2; exit 2 ;;
+    update) require_orbstack; check_upstream; [[ "${ASE_SYNC:-1}" == "0" ]] || sync_studio; update_engine ;;
+    -h|--help|help) sed -n '4,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "Usage: $0 [setup|start|stop|restart|status|logs|open|sync|update]" >&2; exit 2 ;;
 esac

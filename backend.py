@@ -1194,6 +1194,13 @@ def simulate(name):
     else:
         displayed_output = output
     message = "Simulation completed.\n" if rc == 0 else "Simulation failed.\n"
+    freshness = gem5_build_freshness()
+    if freshness["stale"]:
+        # An old executable runs without complaint but may still contain
+        # simulator bugs that its newer source fixes.
+        message = (f"Warning: {freshness['message']} Results may not match the "
+                   "current simulator; rebuild it with Update (on macOS: "
+                   "./macos.sh update).\n\n" + message)
     return {"ok": rc == 0, "output": message,
             "advancedOutput": displayed_output + "\n" + message,
             "trace": trace.name}
@@ -5271,6 +5278,13 @@ def gem5_update_status(refresh=False):
     status.update({key: value for key, value in checkout.items()
                    if key != "managed"})
     status["warning"] = False
+    freshness = gem5_build_freshness(checkout)
+    status["rebuildNeeded"] = freshness["stale"]
+    if freshness["stale"]:
+        # A rebuild alone is an update the user can apply from the app.
+        status["message"] = (freshness["message"] if not status["available"]
+                             else status["message"] + " " + freshness["message"])
+        status["canUpdate"] = not status.get("dirty")
     return status
 
 
@@ -5331,8 +5345,61 @@ def repository_update_status(path, label, refresh=False, ignored_paths=()):
                                            for item in ignored_paths)]}
 
 
-def rebuild_configured_gem5(repository):
-    """Rebuild the configured gem5 target after its source is updated."""
+def gem5_built_commit_path(executable):
+    """Return the file recording which source commit an executable was built from."""
+    executable = Path(executable)
+    return executable.with_name(executable.name + ".source-commit")
+
+
+def gem5_build_freshness(checkout=None):
+    """Report whether the gem5 executable was built from its checked-out source.
+
+    A pull that succeeds while the rebuild that follows it fails or is
+    interrupted leaves new source next to an old executable, and Git alone
+    then reports gem5 as up to date. Each successful rebuild records its
+    commit; builds made before that record existed are compared by date.
+    """
+    checkout = checkout or configured_gem5_checkout()
+    if not checkout.get("managed"):
+        return {"stale": False}
+    repository = Path(checkout["path"])
+    executable = Path(checkout["executable"])
+    ok, head = git_run(["rev-parse", "HEAD"], cwd=repository)
+    if not ok:
+        return {"stale": False}
+    try:
+        built = gem5_built_commit_path(executable).read_text(encoding="utf-8").strip()
+    except OSError:
+        built = ""
+    if built:
+        stale = built != head
+    else:
+        ok, committed = git_run(["log", "-1", "--format=%ct", "HEAD"], cwd=repository)
+        try:
+            stale = ok and int(committed) > executable.stat().st_mtime
+        except (OSError, ValueError):
+            stale = False
+    message = ("gem5: the executable was not built from the checked-out "
+               f"source ({head[:10]}) and must be rebuilt." if stale else "")
+    return {"stale": stale, "sourceCommit": head, "builtCommit": built,
+            "message": message}
+
+
+def record_gem5_built_commit(repository, executable):
+    ok, head = git_run(["rev-parse", "HEAD"], cwd=repository)
+    if ok:
+        try:
+            gem5_built_commit_path(executable).write_text(head + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+
+def rebuild_configured_gem5(repository, stream=False):
+    """Rebuild the configured gem5 target after its source is updated.
+
+    With ``stream`` the build prints straight to this process's terminal,
+    for command-line updates where a long silent build looks hung.
+    """
     checkout = configured_gem5_checkout()
     if not checkout["managed"] or Path(checkout.get("path", "")) != Path(repository):
         return False, checkout.get(
@@ -5377,14 +5444,18 @@ def rebuild_configured_gem5(repository):
     environment = os.environ.copy()
     environment.update({"PYTHON": str(python), "PYTHON_CONFIG": python_config,
                         "CC": compiler, "CXX": cxx})
+    if stream:
+        print(f"$ {shlex.join(command)}", flush=True)
     try:
         result = subprocess.run(command, cwd=repository, env=environment,
-                                text=True, capture_output=True)
+                                text=True, capture_output=not stream)
     except OSError as error:
         return False, f"Could not start the gem5 rebuild: {error}"
-    output = (f"$ {shlex.join(command)}\n" + result.stdout + result.stderr).strip()
+    output = (f"$ {shlex.join(command)}\n" + (result.stdout or "")
+              + (result.stderr or "")).strip()
     if result.returncode != 0:
         return False, "gem5 rebuild failed:\n" + output
+    record_gem5_built_commit(repository, checkout["executable"])
     return True, "gem5 rebuild completed successfully:\n" + output
 
 
@@ -5401,7 +5472,8 @@ def update_status(refresh=False):
         repository_update_status(STUDIO_ROOT, "ASE Studio", refresh),
         gem5_update_status(refresh),
     ]
-    available = any(item["available"] for item in repositories)
+    available = any(item["available"] or item.get("rebuildNeeded")
+                    for item in repositories)
     # Pulling the parent can move the Studio submodule, so local work in
     # either checkout blocks the combined update even if only the other
     # repository currently has new commits.
@@ -5527,6 +5599,70 @@ def restore_local_parent_files(snapshot):
     return True, ""
 
 
+def update_gem5(gem5, stream=False):
+    """Pull gem5 when it is behind, then rebuild if its executable is stale."""
+    if not gem5.get("managed"):
+        return True, []
+    outputs = []
+    if gem5.get("available"):
+        command = (["pull", "--ff-only", "origin", gem5["branch"]]
+                   if gem5["branch"] else
+                   ["merge", "--ff-only", gem5["remoteRef"]])
+        pulled, output = git_run(command, timeout=90, cwd=Path(gem5["path"]))
+        if output:
+            outputs.append(f"gem5:\n{output}")
+        if not pulled:
+            return False, outputs
+    if gem5_build_freshness()["stale"]:
+        rebuilt, build_output = rebuild_configured_gem5(Path(gem5["path"]), stream)
+        outputs.append(build_output if not stream or not rebuilt
+                       else "gem5 rebuild completed successfully.")
+        return rebuilt, outputs
+    return True, outputs
+
+
+def update_engine_from_cli():
+    """Update the simulator and gem5 from a terminal, outside the server.
+
+    ``macos.sh start`` runs this before the server starts, so the gem5
+    rebuild cannot be cut short by closing the app. ASE Studio itself is
+    left alone: macos.sh replaces it with the local checkout right after.
+    """
+    simulator = repository_update_status(
+        ROOT, "Simulator", refresh=True,
+        ignored_paths=("ase_studio", *LOCAL_PARENT_PATHSPECS))
+    gem5 = gem5_update_status(refresh=True)
+    for item in (simulator, gem5):
+        print(item["message"], flush=True)
+    ok = True
+    if simulator["available"]:
+        if simulator.get("dirty"):
+            print("Simulator: skipped, local tracked changes need a choice "
+                  "in the app's Update dialog.", flush=True)
+        else:
+            local_snapshots, error = preserve_local_parent_files()
+            if local_snapshots is None:
+                print(f"Simulator: could not preserve local files: {error}", flush=True)
+                ok = False
+            else:
+                command = (["pull", "--ff-only", "origin", simulator["branch"]]
+                           if simulator["branch"] else
+                           ["merge", "--ff-only", simulator["remoteRef"]])
+                pulled, output = git_run(command, timeout=90, cwd=ROOT)
+                restored, restore_error = restore_local_parent_files(local_snapshots)
+                print(f"Simulator:\n{output}", flush=True)
+                if not restored:
+                    print(restore_error, flush=True)
+                ok = ok and pulled and restored
+    if gem5.get("dirty"):
+        print("gem5: skipped, the checkout has local tracked changes.", flush=True)
+        return False
+    gem5_ok, outputs = update_gem5(gem5, stream=True)
+    for output in outputs:
+        print(output, flush=True)
+    return ok and gem5_ok
+
+
 def pull_update(discard_local_changes=False):
     status = update_status(refresh=True)
     if not status["available"]:
@@ -5608,19 +5744,10 @@ def pull_update(discard_local_changes=False):
         ok = ok and pulled
         if output:
             outputs.append(f"ASE Studio:\n{output}")
-    gem5 = status["repositories"][2]
-    if ok and gem5.get("available"):
-        command = (["pull", "--ff-only", "origin", gem5["branch"]]
-                   if gem5["branch"] else
-                   ["merge", "--ff-only", gem5["remoteRef"]])
-        pulled, output = git_run(command, timeout=90, cwd=Path(gem5["path"]))
-        ok = ok and pulled
-        if output:
-            outputs.append(f"gem5:\n{output}")
-        if pulled:
-            rebuilt, build_output = rebuild_configured_gem5(Path(gem5["path"]))
-            ok = ok and rebuilt
-            outputs.append(build_output)
+    if ok:
+        gem5_ok, gem5_outputs = update_gem5(status["repositories"][2])
+        ok = ok and gem5_ok
+        outputs.extend(gem5_outputs)
     message = "\n\n".join(outputs) or ("Repositories updated." if ok
                                              else "Repository update failed.")
     if ok:
@@ -5827,6 +5954,8 @@ if __name__ == "__main__":
         message, _status = error.args[0]
         print(message, file=sys.stderr)
         raise SystemExit(1)
+    if "--update-engine" in sys.argv:
+        raise SystemExit(0 if update_engine_from_cli() else 1)
     if "--check-startup" in sys.argv:
         if DEVELOPER_MODE:
             print("ASE Studio startup check completed in developer mode.")

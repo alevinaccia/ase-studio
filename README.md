@@ -118,6 +118,12 @@ without restarting; frontend changes then need only a browser reload). Keep the
 checkout up to date with `git pull`, or set `ASE_SYNC=0` to keep running the
 copy installed in the machine, for example after using the in-app updater.
 
+`start` and `restart` also pull the simulator and gem5 from upstream and
+rebuild gem5 whenever its executable was not built from its checked-out source,
+showing the build in the terminal. They also list upstream ASE Studio commits
+this checkout does not include yet. `./macos.sh update` does only this; set
+`ASE_UPDATE=0` to skip it, for example when offline.
+
 Projects, results, and submissions live inside the machine under
 `~/ase_riscv_gem5_sim`. From macOS they are reachable in Finder at
 `~/OrbStack/ase/home/<user>/ase_riscv_gem5_sim`. Submissions are also
