@@ -749,7 +749,15 @@ async function submitAssignment() {
   if (!current) return;
   try {
     const data = await api("/api/projects");
-    $("#submission-projects").innerHTML = data.projects.map(name =>
+    // Offer only the projects that share the current project's folder; an
+    // ungrouped project is offered alongside the other ungrouped ones.
+    const folders = data.folders || [];
+    const folder = folders.find(entry => entry.projects.includes(current.name));
+    const grouped = new Set(folders.flatMap(entry => entry.projects));
+    const names = folder
+      ? folder.projects.filter(name => data.projects.includes(name))
+      : data.projects.filter(name => !grouped.has(name));
+    $("#submission-projects").innerHTML = names.map(name =>
       '<label class="submission-project"><input type="checkbox" data-submission-project value="' + escapeHtml(name) + '" ' + (name === current.name ? "checked" : "") + '><span title="' + escapeHtml(name) + '">' + escapeHtml(name) + "</span></label>"
     ).join("");
     $("#submission-assignment").value = "";
