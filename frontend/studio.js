@@ -30,11 +30,50 @@ let messageDialogConfirmValue = true;
 let messageDialogAlternateValue = null;
 let messageDialogTrimInput = true;
 let pipelineSelectTarget = null;
-let projectFolders = [];
 let externalSyncBusy = false;
 let memoryWatches = [];
 let cpuConfigurationOpenedAs = null;
 let o3Defaults = {};
+let predictorParameterDraft = {};
+const predictorNames = {
+  local: "Local counter (2-bit baseline)",
+  tournament: "Tournament (local + global)",
+  tage: "TAGE (tagged hybrid)",
+  bimode: "Bi-mode"
+};
+const predictorFields = {
+  local: [
+    ["localPredictorSize", "Counter storage (bits)", 2, 65536, "Power of two; entries = storage ÷ counter bits."],
+    ["localCtrBits", "Counter bits (n)", 1, 8, "Each branch-addressed entry has a saturating counter."],
+    ["BTBEntries", "Branch target buffer entries", 2, 65536, "Power of two."],
+  ],
+  tournament: [
+    ["localPredictorSize", "Local counters (entries)", 2, 65536, "Power of two."],
+    ["localCtrBits", "Local counter bits", 1, 8, ""],
+    ["localHistoryTableSize", "Local history entries", 2, 65536, "Power of two."],
+    ["globalPredictorSize", "Global counters (entries; 2^m)", 2, 65536, "Power of two; m = log₂(entries)."],
+    ["globalCtrBits", "Global counter bits (n)", 1, 8, ""],
+    ["choicePredictorSize", "Selector entries", 2, 65536, "Power of two; also affects global-history length."],
+    ["choiceCtrBits", "Selector counter bits", 1, 8, ""],
+    ["BTBEntries", "Branch target buffer entries", 2, 65536, "Power of two."],
+  ],
+  bimode: [
+    ["globalPredictorSize", "Direction counters per bank (entries)", 2, 65536, "Power of two; history length = log₂(entries)."],
+    ["globalCtrBits", "Direction counter bits", 1, 8, ""],
+    ["choicePredictorSize", "Selector entries", 2, 65536, "Power of two."],
+    ["choiceCtrBits", "Selector counter bits", 1, 8, ""],
+    ["BTBEntries", "Branch target buffer entries", 2, 65536, "Power of two."],
+  ],
+  tage: [
+    ["minHist", "Shortest tagged history (branches)", 1, 8192, ""],
+    ["maxHist", "Longest tagged history (branches)", 1, 8192, "Must exceed the shortest history."],
+    ["tagTableCounterBits", "Prediction counter bits", 1, 8, ""],
+    ["tagTableUBits", "Usefulness bits", 1, 2, "This gem5 implementation supports 1 or 2."],
+    ["tagTableTagWidths", "Tag widths (bits)", null, null, "Eight comma-separated values: 0 for the base, then seven tagged tables."],
+    ["logTagTableSizes", "Log₂ table entries", null, null, "Eight comma-separated values: base, then seven tagged tables."],
+    ["BTBEntries", "Branch target buffer entries", 2, 65536, "Power of two."],
+  ]
+};
 let studioFeatures = {
   developerMode: false,
   memoryConfiguration: false,
@@ -456,15 +495,6 @@ function markSourceEdited() {
   sourceDirty = Boolean(current) && $("#body").value !== savedSource;
   updateDirtyIndicator();
 }
-
-// Mnemonics come from the RISC-V manual so highlighting and the reference
-// cover the same instructions. Longest first, so fence.i wins over fence.
-const OPCODE_PATTERN = new RegExp("\\b(c[._][a-z][\\w.]*|" + RISCV_MANUAL
-  .filter(entry => entry.extension !== "Directive" && entry.extension !== "C")
-  .map(entry => entry.mnemonic)
-  .sort((a, b) => b.length - a.length)
-  .map(mnemonic => mnemonic.replace(/\./g, "\\.") + (/^(?:lr|sc|amo)/.test(mnemonic) ? "(?:\\.aqrl|\\.aq|\\.rl)?" : ""))
-  .join("|") + ")\\b", "gi");
 
 function draftStorageKey(name) {
   return name ? `ase-studio-draft:${name}` : "";
@@ -994,7 +1024,7 @@ function highlightAsmLine(line) {
     .replace(/(^|\s)(\.[\w.]+)/g, '$1<span class="directive">$2</span>')
     .replace(/\b(x(?:[12]?\d|3[01]|0)|f(?:[12]?\d|3[01]|0)|zero|ra|sp|gp|tp|[ast]([0-9]|10|11)|ft(?:[0-9]|10|11)|fs(?:[0-9]|10|11)|fa[0-7])\b/g,
       '<span class="register">$&</span>')
-    .replace(OPCODE_PATTERN,
+    .replace(/\b(c[._][a-z][\w.]*|add|addi|sub|sll|slli|slt|slti|sltu|sltiu|xor|xori|srl|srli|sra|srai|or|ori|and|andi|lui|auipc|lb|lbu|lh|lhu|lw|lwu|ld|sb|sh|sw|sd|mul|mulh|mulhsu|mulhu|div|divu|rem|remu|flw|fld|fsw|fsd|f(?:add|sub|mul|div|min|max)\.[sd]|f(?:madd|msub|nmsub|nmadd)\.[sd]|fsqrt\.[sd]|fsgnj[nx]?\.[sd]|f(?:eq|lt|le|class)\.[sd]|fcvt\.(?:w|wu|l|lu|s|d)\.(?:w|wu|l|lu|s|d)|fmv\.(?:x\.w|w\.x)|(?:lr|sc|amo(?:swap|add|xor|and|or|min|max|minu|maxu))\.w|beqz|bnez|beq|bne|blt|bge|bltu|bgeu|jal|jalr|j|jr|ret|call|tail|li|la|mv|neg|not|seqz|snez|sltz|sgtz|csrrw|csrrs|csrrc|csrrwi|csrrsi|csrrci|csrr|csrw|csrs|csrc|csrwi|csrsi|csrci|rdcycle|rdtime|rdinstret|fence\.i|fence|nop|ecall|ebreak|wfi|mret)\b/gi,
       '<span class="opcode">$&</span>')
     .replace(/^(\s*)([\w.]+):/, '$1<span class="label">$2</span>:');
 
@@ -1123,128 +1153,12 @@ async function loadProjects() {
   const data = await api("/api/projects");
   const heading = document.querySelector(".project-panel-header h2");
   if (heading) heading.title = `Programs folder: ${data.directory || "unknown"}`;
-  projectFolders = data.folders || [];
-  const collapsed = collapsedProjectFolders();
-  const grouped = new Set(projectFolders.flatMap(folder => folder.projects));
-  const projectButton = name =>
-    `<button class="project ${name === current?.name ? "selected" : ""}" data-name="${escapeHtml(name)}" draggable="true">${escapeHtml(name)}</button>`;
-  const folders = projectFolders.map((folder, index) => {
-    const isCollapsed = collapsed.has(folder.name);
-    const items = folder.projects.map(projectButton).join("")
-      || '<div class="project-folder-empty">Drag projects here</div>';
-    return `<div class="project-folder${isCollapsed ? " collapsed" : ""}" data-folder-drop="${index}">`
-      + `<div class="project-folder-header"><button class="project-folder-toggle" data-folder-toggle="${index}" aria-expanded="${!isCollapsed}"><span class="project-folder-chevron">▾</span><span class="project-folder-name">${escapeHtml(folder.name)}</span><span class="project-folder-count">${folder.projects.length}</span></button>`
-      + `<button class="project-folder-action" data-folder-rename="${index}" title="Rename folder" aria-label="Rename folder ${escapeHtml(folder.name)}">✎</button>`
-      + `<button class="project-folder-action" data-folder-delete="${index}" title="Delete folder (its projects are kept)" aria-label="Delete folder ${escapeHtml(folder.name)}">×</button></div>`
-      + `<div class="project-folder-items">${items}</div></div>`;
-  }).join("");
-  const loose = data.projects.filter(name => !grouped.has(name)).map(projectButton).join("");
-  $("#projects").innerHTML = folders + loose;
-}
-
-// Folders only group the sidebar; projects stay flat in the programs folder.
-const COLLAPSED_FOLDERS_KEY = "ase-studio-collapsed-folders";
-
-function collapsedProjectFolders() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(COLLAPSED_FOLDERS_KEY) || "[]");
-    return new Set(Array.isArray(saved) ? saved : []);
-  } catch (_error) {
-    return new Set();
-  }
-}
-
-function setProjectFolderCollapsed(name, collapsed) {
-  const folders = collapsedProjectFolders();
-  if (collapsed) folders.add(name);
-  else folders.delete(name);
-  try {
-    localStorage.setItem(COLLAPSED_FOLDERS_KEY, JSON.stringify([...folders]));
-  } catch (_error) {
-    // Collapsing still works for this session.
-  }
-}
-
-async function saveProjectFolders(folders, title) {
-  try {
-    await api("/api/folders", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({folders})
-    });
-  } catch (error) {
-    await showActionMessage(title, error.message);
-  }
-  await loadProjects();
-}
-
-function copyProjectFolders() {
-  return projectFolders.map(folder => ({name: folder.name, projects: [...folder.projects]}));
-}
-
-async function createProjectFolder() {
-  const name = await actionDialog({
-    title: "New folder",
-    message: "Group projects in the sidebar. Drag projects into the folder to move them.",
-    inputLabel: "Folder name",
-    confirmLabel: "Create",
-    cancelLabel: "Cancel"
+  $("#projects").innerHTML = data.projects.map(name =>
+    `<button class="project ${name === current?.name ? "selected" : ""}" data-name="${escapeHtml(name)}">${escapeHtml(name)}</button>`
+  ).join("");
+  document.querySelectorAll(".project").forEach(button => {
+    button.onclick = () => openProject(button.dataset.name);
   });
-  if (!name) return;
-  await saveProjectFolders([...copyProjectFolders(), {name, projects: []}], "New folder");
-}
-
-async function renameProjectFolder(index) {
-  const folders = copyProjectFolders();
-  const oldName = folders[index]?.name;
-  if (oldName === undefined) return;
-  const name = await actionDialog({
-    title: "Rename folder",
-    message: "Enter a new name for this folder.",
-    inputLabel: "Folder name",
-    inputValue: oldName,
-    confirmLabel: "Rename",
-    cancelLabel: "Cancel"
-  });
-  if (!name || name === oldName) return;
-  folders[index].name = name;
-  if (collapsedProjectFolders().has(oldName)) {
-    setProjectFolderCollapsed(oldName, false);
-    setProjectFolderCollapsed(name, true);
-  }
-  await saveProjectFolders(folders, "Rename folder");
-}
-
-async function deleteProjectFolder(index) {
-  const folders = copyProjectFolders();
-  const folder = folders[index];
-  if (!folder) return;
-  const count = folder.projects.length;
-  const confirmed = await actionDialog({
-    title: "Delete folder",
-    message: count
-      ? `Delete folder "${folder.name}"? Its ${count} project${count === 1 ? "" : "s"} will move back to the top level; no project is deleted.`
-      : `Delete the empty folder "${folder.name}"?`,
-    confirmLabel: "Delete folder",
-    cancelLabel: "Cancel",
-    danger: true
-  });
-  if (confirmed !== true) return;
-  folders.splice(index, 1);
-  setProjectFolderCollapsed(folder.name, false);
-  await saveProjectFolders(folders, "Delete folder");
-}
-
-async function moveProjectToFolder(name, target) {
-  const folders = copyProjectFolders();
-  const source = folders.findIndex(folder => folder.projects.includes(name));
-  if (source === target) return;
-  if (source >= 0) folders[source].projects = folders[source].projects.filter(project => project !== name);
-  if (target !== null) {
-    folders[target].projects.push(name);
-    setProjectFolderCollapsed(folders[target].name, false);
-  }
-  await saveProjectFolders(folders, "Move project");
 }
 
 async function resolveUnsavedProject(action) {
@@ -1361,7 +1275,6 @@ async function openProject(name, {skipUnsavedCheck = false} = {}) {
   }
   updateLog();
   showTab("output");
-  refreshManualConfig();
   return true;
 }
 
@@ -1547,15 +1460,7 @@ async function submitAssignment() {
   if (!current) return;
   try {
     const data = await api("/api/projects");
-    // Offer only the projects that share the current project's folder; an
-    // ungrouped project is offered alongside the other ungrouped ones.
-    const folders = data.folders || [];
-    const folder = folders.find(entry => entry.projects.includes(current.name));
-    const grouped = new Set(folders.flatMap(entry => entry.projects));
-    const names = folder
-      ? folder.projects.filter(name => data.projects.includes(name))
-      : data.projects.filter(name => !grouped.has(name));
-    $("#submission-projects").innerHTML = names.map(name =>
+    $("#submission-projects").innerHTML = data.projects.map(name =>
       '<label class="submission-project"><input type="checkbox" data-submission-project value="' + escapeHtml(name) + '" ' + (name === current.name ? "checked" : "") + '><span title="' + escapeHtml(name) + '">' + escapeHtml(name) + "</span></label>"
     ).join("");
     $("#submission-assignment").value = "";
@@ -1680,17 +1585,9 @@ async function prepareSubmission() {
           body: JSON.stringify({archive: result.archive})
         });
       } catch (revealError) {
-        // Without a desktop file manager (e.g. Studio opened in a browser), download the ZIP.
-        const link = document.createElement("a");
-        link.href = "/api/submission/download?archive=" + encodeURIComponent(result.archive);
-        link.download = "";
-        document.body.append(link);
-        link.click();
-        link.remove();
-        const note = "The submission folder could not be opened (" + revealError.message +
-          "), so the ZIP was downloaded by the browser instead.";
-        lastNormalLog += "\n\n" + note;
-        lastAdvancedLog += "\n\n" + note;
+        const warning = "The submission was created, but its folder could not be opened: " + revealError.message;
+        lastNormalLog += "\n\n" + warning;
+        lastAdvancedLog += "\n\n" + warning;
         updateLog();
       }
     }
@@ -1784,36 +1681,7 @@ function showTab(tab) {
   $("#output-pane").hidden = tab !== "output";
   $("#pipeline").hidden = tab !== "pipeline";
   $("#memory").hidden = tab !== "memory";
-  $("#manual").hidden = tab !== "manual";
   if (tab === "memory") renderMemory();
-}
-
-// Opens the manual on the instruction under `index` in `text`, or on the
-// search box when there is no word there.
-function lookUpInstruction(text, index) {
-  let start = index;
-  let end = index;
-  while (start > 0 && /[\w.]/.test(text[start - 1])) start--;
-  while (end < text.length && /[\w.]/.test(text[end])) end++;
-  const word = text.slice(start, end);
-  showTab("manual");
-  if (word) manual.open(word);
-  else manual.focusSearch();
-}
-
-async function refreshManualConfig() {
-  if (!current) {
-    manual.setConfig(null);
-    return;
-  }
-  const name = current.name;
-  try {
-    const config = await api("/api/config?name=" + encodeURIComponent(name));
-    if (current?.name !== name) return;
-    manual.setConfig({...config, cpu: studioFeatures.multiIssueCpu ? config.cpu : "in-order"});
-  } catch {
-    manual.setConfig(null);
-  }
 }
 
 function resetPipelineViewport() {
@@ -1908,7 +1776,6 @@ async function run(stepAfterRun = false) {
         renderPipeline();
         resetPipelineViewport();
         showTab("pipeline");
-        if (stepAfterRun) showPlaybackStep();
       }
     }
   } catch (error) {
@@ -2034,67 +1901,20 @@ async function runStep() {
     await run(true);
     return;
   }
-  movePlaybackCycle(1);
+  playbackCycle += 1;
+  selectedColumn = playbackCycle;
+  $("#step").textContent = playbackCycle >= pipelineData.cycles ? "Restart Step" : "Next Cycle";
+  renderPipeline();
+  showTab("pipeline");
 }
 
 function movePlaybackCycle(delta) {
   if (!stepMode || !pipelineData || playbackCycle === null) return;
   playbackCycle = Math.max(1, Math.min(pipelineData.cycles, playbackCycle + delta));
-  showPlaybackStep();
-}
-
-// The current step is the most advanced instruction in the cycle (the one
-// writing back or committing when there is one); ties go to the oldest row.
-function playbackStepRow(rows, cycle) {
-  const rank = {S: 0.5, F: 1, D: 2, R: 3, I: 4, E: 5, M: 6, C: 7, W: 8};
-  let best = -1;
-  let bestRank = 0;
-  rows.forEach((row, index) => {
-    const stage = row.cycles[cycle] || "";
-    const value = Math.max(0, ...[...stage].map(marker => rank[marker] || 0));
-    if (value > bestRank) {
-      best = index;
-      bestRank = value;
-    }
-  });
-  return best;
-}
-
-function showPlaybackStep() {
-  const rows = displayedPipelineRows();
-  const row = playbackStepRow(rows, playbackCycle);
   selectedColumn = playbackCycle;
-  selectedRow = row >= 0 ? row : null;
   $("#step").textContent = playbackCycle >= pipelineData.cycles ? "Restart Step" : "Next Cycle";
-  showTab("pipeline");
   renderPipeline();
-  scrollPipelineToSelection();
-  highlightSourceLine(row >= 0 ? rows[row].sourceLine : null);
-}
-
-function scrollPipelineToSelection() {
-  const scroll = $("#pipeline-scroll");
-  const header = scroll.querySelector(".pipeline-header")?.offsetHeight || 0;
-  if (selectedRow !== null) {
-    const top = selectedRow * PIPELINE_ROW_HEIGHT;
-    const visibleHeight = scroll.clientHeight - header;
-    if (top < scroll.scrollTop) scroll.scrollTop = top;
-    else if (top + PIPELINE_ROW_HEIGHT > scroll.scrollTop + visibleHeight) {
-      scroll.scrollTop = top + PIPELINE_ROW_HEIGHT - visibleHeight;
-    }
-  }
-  if (selectedColumn !== null) {
-    const style = getComputedStyle(document.documentElement);
-    const fixed = ["--address-width", "--instruction-width", "--flow-width"]
-      .reduce((total, name) => total + (parseFloat(style.getPropertyValue(name)) || 0), 0);
-    const cellWidth = Number($("#cell-width").value);
-    const left = (selectedColumn - 1) * cellWidth;
-    const visibleWidth = scroll.clientWidth - fixed;
-    if (left < scroll.scrollLeft) scroll.scrollLeft = left;
-    else if (left + cellWidth > scroll.scrollLeft + visibleWidth) {
-      scroll.scrollLeft = left + cellWidth - visibleWidth;
-    }
-  }
+  showTab("pipeline");
 }
 
 function positionPipelineCycle(cycle) {
@@ -2108,14 +1928,16 @@ function positionPipelineCycle(cycle) {
     + Number.parseFloat(
       getComputedStyle(document.documentElement).getPropertyValue("--flow-width"));
   const cellWidth = Number($("#cell-width").value);
+  const displayCycles = pipelineDisplayCycles();
+  const cycleIndex = displayCycles.findIndex(value => value >= cycle);
   // The three frozen columns occupy positions 1–3. Leave one preceding
   // cycle visible so the requested cycle appears at table column 5.
-  const pipelineWidth = frozenWidth + pipelineData.cycles * cellWidth;
+  const pipelineWidth = frozenWidth + displayCycles.length * cellWidth;
   const horizontalTail = Math.max(
     0, scroll.clientWidth - frozenWidth - 2 * cellWidth);
   grid.style.width = `${pipelineWidth + horizontalTail}px`;
   scroll.scrollLeft = Math.max(
-    0, (cycle - 2) * cellWidth);
+    0, (cycleIndex - 1) * cellWidth);
 
   const eventRow = displayedPipelineRows().findIndex(row =>
     row.cycles?.[String(cycle)] !== undefined);
@@ -2183,11 +2005,13 @@ function renderPipelineDiagram() {
   const o3 = config.cpu === "out-of-order";
   const visibleO3Stages = new Set(config.o3VisibleStages || ["issue", "execute", "memory", "cdb", "commit"]);
   const o3Stages = [
-    ["fetch", "Fetch", "F"], ["decode", "Decode", "D"],
-    ["rename", "Rename", "R"], ["issue", "Issue", "I"],
+    ["fetch", `Fetch × ${config.fetchWidth || 2}`, "F"],
+    ["decode", `Decode × ${config.decodeWidth || 2}`, "D"],
+    ["rename", `Rename × ${config.renameWidth || 2}`, "R"],
+    ["issue", `Issue × ${config.dispatchWidth || 2}`, "I"],
     ["execute", "EXE", "E"], ["memory", "MEM", "M"],
     ["cdb", `CDB × ${config.writebackWidth || 1}`, "C"],
-    ["commit", "Commit", "W"]
+    ["commit", `Commit × ${config.commitWidth || 2}`, "W"]
   ];
   const stages = o3
     ? o3Stages.filter(([key]) => visibleO3Stages.has(key)).map(([_key, label, code]) => [label, code])
@@ -2198,11 +2022,13 @@ function renderPipelineDiagram() {
     ? `L1 I ${config.iCacheSize} · D ${config.dCacheSize}<br>Hit ${config.cacheLatency} cycles · RAM ${config.memoryLatency} cycles`
     : `Direct memory · I ${config.instructionMemoryLatency} · Read ${config.dataReadLatency} · Write ${config.dataWriteLatency} cycles`;
   const predictorName = {
-    ideal: "Ideal (perfect prediction)", local: "Local two-bit",
-    tournament: "Tournament", bimode: "Bi-mode", tage: "TAGE"
-  }[config.branchPredictor] || "Ideal (perfect prediction)";
+    ideal: "Ideal (teaching baseline)",
+    local: "Local counter (2-bit baseline)",
+    tournament: "Tournament (local + global)",
+    bimode: "Bi-mode", tage: "TAGE (tagged hybrid)"
+  }[config.branchPredictor] || "Ideal (teaching baseline)";
   const details = (o3
-    ? `Out-of-order execution · speculation on<br>Predictor: ${predictorName}<br>Issue ${config.dispatchWidth} · branches/jumps issue alone<br>CDB ${config.writebackWidth} · Commit ${config.commitWidth}<br>Address unit: 1 cycle · Jump unit: 1 cycle<br>ROB · RS/IQ · LQ · SQ: unlimited`
+    ? `Out-of-order execution · speculation on<br>Predictor: ${predictorName}<br>Fetch ${config.fetchWidth} · Decode ${config.decodeWidth} · Rename ${config.renameWidth}<br>Issue ${config.dispatchWidth} · branches/jumps issue alone<br>CDB ${config.writebackWidth} · Commit ${config.commitWidth}<br>EXE: Int ALU ${config.intAluUnits || 1} · Mul ${config.intMulUnits || 1} · Div ${config.intDivUnits || 1}<br>FP ALU ${config.floatAluUnits || 1} · Mul ${config.floatMulUnits || 1} · Div ${config.floatDivUnits || 1}<br>Shared load/store units: ${config.memoryUnits || 1}<br>ROB · RS/IQ · LQ · SQ: unlimited`
     : `Forwarding: ${config.forwarding ? "on" : "off"}<br>Out-of-order execution: ${config.outOfOrderExecution !== false ? "on" : "off"}`)
     + `<br>Floating point: ${config.floatingPointPrecision === "double" ? "double (64-bit)" : "single (32-bit)"}`
     + `<br>Compressed instructions: ${config.compressedInstructions ? "on" : "off"}`
@@ -2256,9 +2082,6 @@ function availableMemorySymbols() {
     const size = Math.max(1, Number(symbol.size) || 4);
     let elementSize = Number(symbol.elementSize);
     if (!MEMORY_ELEMENT_NAMES[elementSize]) elementSize = size % 4 === 0 ? 4 : 1;
-    // .space/.skip/.zero reserve raw bytes, so view them as words rather
-    // than byte by byte (memoryDisplayLayout widens them to doubles).
-    if (symbol.untypedStorage && size % 4 === 0) elementSize = 4;
     if (size % elementSize) elementSize = 1;
     return {
       ...symbol,
@@ -2657,11 +2480,14 @@ function pipelineRowBounds(row) {
 }
 
 function jumpsForPipelineRow(row, lastVisibleCycle, expanded = expandedLoopView()) {
+  if (row.squashed) return [];
   let jumps = (pipelineData.jumps || []).filter(jump =>
     jump.fromAddress === row.address && jump.cycle <= lastVisibleCycle);
   if (expanded) {
     const bounds = pipelineRowBounds(row);
-    jumps = jumps.filter(jump => bounds.first <= jump.cycle && jump.cycle <= bounds.last);
+    jumps = jumps.filter(jump => jump.instructionSequence != null && row.sequence != null
+      ? jump.instructionSequence === row.sequence
+      : bounds.first <= jump.cycle && jump.cycle <= bounds.last);
   }
   const grouped = new Map();
   jumps.forEach(jump => {
@@ -2704,7 +2530,28 @@ function jumpTargetRow(rows, address, afterCycle = 0) {
   return fallback;
 }
 
-const PIPELINE_ROW_HEIGHT = 27;
+function pipelineStageTokens(stage) {
+  return stage.match(/[A-Z]\*?/g) || [];
+}
+
+function pipelineStageLabel(stage, o3) {
+  const tokens = pipelineStageTokens(stage);
+  if (o3) {
+    return tokens.map(token =>
+      ({C: "CDB", W: "C"}[token[0]] || token[0]) + token.slice(1)).join("/");
+  }
+  return tokens.length > 1 ? tokens.join("/") : stage;
+}
+
+function pipelineDisplayCycles(data = pipelineData) {
+  if (!data) return [];
+  const hidden = new Set(data.collapsedRecoveryCycles || []);
+  const cycles = [];
+  for (let cycle = 1; cycle <= data.cycles; cycle++) {
+    if (!hidden.has(cycle)) cycles.push(cycle);
+  }
+  return cycles;
+}
 
 function renderPipeline() {
   if (pipelinePaintFrame !== null) {
@@ -2718,6 +2565,7 @@ function renderPipeline() {
   const data = pipelineData;
   if (!data) {
     $("#pipeline-grid").innerHTML = "";
+    updatePipelineScrollButtons();
     $("#pipeline-diagram").innerHTML = "";
     $("#pipeline-pc").textContent = "PC —";
     $("#pipeline-summary").textContent = "No pipeline trace loaded.";
@@ -2727,15 +2575,17 @@ function renderPipeline() {
     return;
   }
   const displayRows = displayedPipelineRows();
+  const displayCycles = pipelineDisplayCycles(data);
+  const columnCount = displayCycles.length;
   const dynamicRows = (data.dynamicInstructions?.length ? data.dynamicInstructions : data.instructions)
     .filter(row => !row.squashed);
   const cellWidth = Number($("#cell-width").value);
-  const rowHeight = PIPELINE_ROW_HEIGHT;
+  const rowHeight = 27;
   const addressWidth = 88;
   const instructionWidth = window.innerWidth <= 700 ? 150 : 182;
   const flowWidth = window.innerWidth <= 700 ? 132 : 140;
   const frozenWidth = addressWidth + instructionWidth + flowWidth;
-  const totalWidth = addressWidth + instructionWidth + flowWidth + data.cycles * cellWidth;
+  const totalWidth = addressWidth + instructionWidth + flowWidth + columnCount * cellWidth;
   const grid = $("#pipeline-grid");
   const scroll = $("#pipeline-scroll");
   const savedLeft = scroll.scrollLeft;
@@ -2755,8 +2605,10 @@ function renderPipeline() {
   const predictionSummary = predictionMisses ? ` · ${predictionMisses} BP misses` : "";
   $("#pipeline-summary").textContent = `${instructionCount} instructions · ${codeBytes} bytes pipeline code${predictionSummary} · CPI ${cpi}`;
   updateCycleNavigation();
-  grid.style.width = totalWidth + "px";
-  grid.innerHTML = `<div class="pipeline-header" style="width:${totalWidth}px"></div><div class="pipeline-rows" style="height:${displayRows.length * rowHeight}px;width:${totalWidth}px"></div>`;
+  // Leave one cell of scrollable breathing room without adding fake cycles
+  // or instructions to the table, playback, statistics, or CSV exports.
+  grid.style.width = (totalWidth + cellWidth) + "px";
+  grid.innerHTML = `<div class="pipeline-header" style="width:${totalWidth}px"></div><div class="pipeline-rows" style="height:${(displayRows.length + 1) * rowHeight}px;width:${totalWidth}px"></div>`;
   const header = grid.querySelector(".pipeline-header");
   const rows = grid.querySelector(".pipeline-rows");
   const cycleOverscan = 8;
@@ -2772,18 +2624,18 @@ function renderPipeline() {
     const firstVisible = Math.max(
       1, Math.floor(scroll.scrollLeft / cellWidth) + 1);
     const lastVisible = Math.min(
-      data.cycles,
+      columnCount,
       Math.ceil((scroll.scrollLeft + cycleViewportWidth) / cellWidth));
     return {
       first: Math.max(1, firstVisible - cycleOverscan),
-      last: Math.min(data.cycles, lastVisible + cycleOverscan)
+      last: Math.min(columnCount, lastVisible + cycleOverscan)
     };
   }
 
   function virtualColumns(firstCycle, lastCycle) {
     const beforeWidth = (firstCycle - 1) * cellWidth;
     const cycleCount = Math.max(0, lastCycle - firstCycle + 1);
-    const afterWidth = Math.max(0, data.cycles - lastCycle) * cellWidth;
+    const afterWidth = Math.max(0, columnCount - lastCycle) * cellWidth;
     return `${addressWidth}px ${instructionWidth}px ${flowWidth}px ${beforeWidth}px repeat(${cycleCount}, ${cellWidth}px) ${afterWidth}px`;
   }
 
@@ -2792,7 +2644,8 @@ function renderPipeline() {
     html += '<div class="cell inst head corner">Instruction</div>';
     html += '<div class="cell flow-cell head corner" title="Control-flow transfers, prediction misses, and cache misses">Control / cache</div>';
     html += '<div class="pipeline-cycle-spacer" aria-hidden="true"></div>';
-    for (let cycle = firstCycle; cycle <= lastCycle; cycle++) {
+    for (let column = firstCycle; column <= lastCycle; column++) {
+      const cycle = displayCycles[column - 1];
       html += `<div class="cell head ${selectedColumn === cycle ? "column-selected" : ""}${cycle > visibleCycle ? " future" : ""}" data-col="${cycle}">${cycle}</div>`;
     }
     html += '<div class="pipeline-cycle-spacer" aria-hidden="true"></div>';
@@ -2805,7 +2658,7 @@ function renderPipeline() {
 
     for (let rowIndex = first; rowIndex < last; rowIndex++) {
       const row = displayRows[rowIndex];
-      html += `<div class="pipeline-row ${selectedRow === rowIndex ? "row-selected" : ""}" style="top:${rowIndex * rowHeight}px;grid-template-columns:${columns};width:${totalWidth}px">`;
+      html += `<div class="pipeline-row ${selectedRow === rowIndex ? "row-selected" : ""}${row.squashed ? " wrong-path" : ""}" style="top:${rowIndex * rowHeight}px;grid-template-columns:${columns};width:${totalWidth}px">`;
       const iterationText = row.iterations > 1 ? ` · ${row.iterations} iterations` : "";
       const address = row.address ? `0x${escapeHtml(row.address)}` : "—";
       html += `<div class="cell address-cell" data-row="${rowIndex}" title="Program counter">${address}</div>`;
@@ -2829,16 +2682,20 @@ function renderPipeline() {
       const predictionEvent = predictionMisses
         ? `<span class="branch-miss">BP miss${predictionMisses > 1 ? ` ×${predictionMisses}` : ""}</span>`
         : "";
-      html += `<div class="cell flow-cell" data-row="${rowIndex}">${jumpLinks}${predictionEvent}${cacheEvents}</div>`;
+      const squashEvent = row.squashed
+        ? `<span class="squash-label" title="Wrong-path instruction discarded after a branch misprediction">Squashed</span>`
+        : "";
+      html += `<div class="cell flow-cell" data-row="${rowIndex}">${jumpLinks}${predictionEvent}${cacheEvents}${squashEvent}</div>`;
       html += '<div class="pipeline-cycle-spacer" aria-hidden="true"></div>';
-      for (let cycle = firstCycle; cycle <= lastCycle; cycle++) {
+      for (let column = firstCycle; column <= lastCycle; column++) {
+        const cycle = displayCycles[column - 1];
         const stage = row.cycles[cycle] || "";
-        const label = pipelineData.format === "o3"
-          ? stage.split("").map(marker => ({C: "CDB", W: "C"}[marker] || marker)).join("/")
-          : stage.length > 1 && stage !== "S" ? stage.split("").join("/") : stage;
-        const stageClass = stage ? "stage-" + stage.slice(-1) : "";
+        const label = pipelineStageLabel(stage, pipelineData.format === "o3");
+        const tokens = pipelineStageTokens(stage);
+        const stageClass = tokens.length ? "stage-" + tokens.at(-1)[0] : "";
+        const squashedClass = stage.includes("*") ? " squashed-stage" : "";
         const columnClass = selectedColumn === cycle ? " column-selected" : "";
-        html += `<div class="cell ${stageClass}${columnClass}${cycle > visibleCycle ? " future" : ""}" data-row="${rowIndex}" data-col="${cycle}" data-stage="${stage}">${label}</div>`;
+        html += `<div class="cell ${stageClass}${squashedClass}${columnClass}${cycle > visibleCycle ? " future" : ""}" data-row="${rowIndex}" data-col="${cycle}" data-stage="${stage}">${label}</div>`;
       }
       html += '<div class="pipeline-cycle-spacer" aria-hidden="true"></div>';
       html += "</div>";
@@ -2898,8 +2755,10 @@ function renderPipeline() {
         S: pipelineData.format === "o3" ? "Wait in reservation station / ROB" : "Pipeline stall / wait",
         X: "Squashed after incorrect speculation"
       };
-      const stageName = stage.split("")
-        .map(marker => stageNames[marker] || marker).join(" / ");
+      const stageName = pipelineStageTokens(stage)
+        .map(token => (stageNames[token[0]] || token[0])
+          + (token.endsWith("*") ? " (wrong path; later squashed)" : ""))
+        .join(" / ");
       $("#detail").textContent = `Instruction: ${row.instruction} | Cycle: ${cell.dataset.col} | Stage: ${stageName} | Iterations: ${row.iterations}`;
     } else {
       $("#detail").textContent = `Clock cycle ${cell.dataset.col}`;
@@ -2928,13 +2787,7 @@ function renderPipeline() {
     if (cell.dataset.col !== undefined) selectedColumn = Number(cell.dataset.col);
     paintViewport(true);
   };
-  grid.onclick = event => {
-    if (!event.ctrlKey && !event.metaKey) return;
-    const cell = event.target.closest(".inst[data-row]");
-    if (!cell) return;
-    const opcode = displayRows[Number(cell.dataset.row)].instruction.trim().split(/\s+/)[0];
-    lookUpInstruction(opcode, 0);
-  };
+  grid.onclick = null;
   grid.oncontextmenu = event => {
     if (!event.target.closest("[data-row], [data-col], [data-jump-target]")) return;
     event.preventDefault();
@@ -2952,6 +2805,7 @@ function renderPipeline() {
   // renderPipeline can run while its tab is hidden. Recalculate once the
   // browser has laid out the newly visible pipeline viewport.
   schedulePaint(true);
+  updatePipelineScrollButtons();
   renderRegisters();
   renderPipelineDiagram();
   renderMemory();
@@ -2966,6 +2820,8 @@ function adjustCellWidth(delta) {
 function exportVisiblePipeline() {
   if (!pipelineData || !current) return;
   const lastCycle = playbackCycle === null ? pipelineData.cycles : playbackCycle;
+  const displayCycles = pipelineDisplayCycles(pipelineData)
+    .filter(cycle => cycle <= lastCycle);
   const quote = value => `"${String(value ?? "").replaceAll('"', '""')}"`;
   const dynamicRows = (pipelineData.dynamicInstructions?.length
     ? pipelineData.dynamicInstructions : pipelineData.instructions)
@@ -2977,7 +2833,9 @@ function exportVisiblePipeline() {
     total + Number(row.mispredictions || (row.mispredicted ? 1 : 0)), 0);
   const cpi = instructionCount ? (pipelineData.cycles / instructionCount).toFixed(3) : "0";
   const headers = ["PC Address", "Instruction", "Control flow / cache"];
-  for (let cycle = 1; cycle <= lastCycle; cycle++) headers.push(`Cycle ${cycle}`);
+  for (const cycle of displayCycles) {
+    headers.push(`Cycle ${cycle}`);
+  }
   const rows = displayedPipelineRows().map(row => {
     const flow = [
       ...jumpsForPipelineRow(row, lastCycle).map(jump =>
@@ -2986,14 +2844,12 @@ function exportVisiblePipeline() {
         `${event.cache}$ ${event.result}${event.count > 1 ? ` x${event.count}` : ""}`),
       ...(Number(row.mispredictions || (row.mispredicted ? 1 : 0))
         ? [`BP miss${Number(row.mispredictions || 1) > 1 ? ` x${Number(row.mispredictions)}` : ""}`]
-        : [])
+        : []),
+      ...(pipelineData.format === "o3" && row.squashed ? ["Squashed"] : [])
     ].join("; ");
     const values = [row.address ? `0x${row.address}` : "", row.instruction, flow];
-    for (let cycle = 1; cycle <= lastCycle; cycle++) {
-      const stage = row.cycles[String(cycle)] || "";
-      values.push(pipelineData.format === "o3"
-        ? stage.split("").map(marker => ({C: "CDB", W: "C"}[marker] || marker)).join("/")
-        : stage);
+    for (const cycle of displayCycles) {
+      values.push(pipelineStageLabel(row.cycles[cycle] || "", pipelineData.format === "o3"));
     }
     return values;
   });
@@ -3022,22 +2878,13 @@ function updateForwardingControl() {
     && $("#cpu-model").value === "out-of-order";
   const integerPanel = $("#integer-unit-settings");
   const floatingPanel = $("#floating-unit-settings");
-  const integerAluRow = $("#int-alu").closest(".unit-row");
-  const unitFields = (outOfOrder ? floatingPanel : integerPanel).querySelector(".unit-fields");
-  unitFields.insertBefore(integerAluRow, unitFields.querySelector(".unit-heading").nextElementSibling);
-  integerPanel.hidden = outOfOrder;
+  integerPanel.hidden = false;
   floatingPanel.closest(".units-grid").classList.toggle("superscalar", outOfOrder);
+  integerPanel.querySelector("legend").textContent = outOfOrder
+    ? "Integer and load/store units · clock cycles" : "Integer unit · clock cycles";
   floatingPanel.querySelector("legend").textContent = outOfOrder
-    ? "Functional units · clock cycles" : "Floating-point unit · clock cycles";
-  integerAluRow.firstElementChild.textContent = outOfOrder ? "Integer ALU" : "ALU";
-  for (const [id, singleLabel, combinedLabel] of [
-    ["float-alu", "ALU", "FP arithmetic"],
-    ["float-mul", "Multiply", "FP multiply"],
-    ["float-div", "Divide", "FP divide"]
-  ]) {
-    $("#" + id).closest(".unit-row").firstElementChild.textContent = outOfOrder
-      ? combinedLabel : singleLabel;
-  }
+    ? "Floating-point units · clock cycles" : "Floating-point unit · clock cycles";
+  $("#o3-memory-units-field").hidden = !outOfOrder;
   $("#forwarding").disabled = outOfOrder;
   if (outOfOrder) $("#forwarding").checked = true;
   $("#forwarding-note").textContent = outOfOrder ? "(results use CDB/ROB forwarding)" : "";
@@ -3045,11 +2892,6 @@ function updateForwardingControl() {
   $("#memory-management").hidden = !studioFeatures.memoryConfiguration;
   $("#out-of-order-execution").closest("label").hidden = outOfOrder;
   $("#out-of-order-execution").disabled = outOfOrder;
-  ["int-mul", "int-div"].forEach(id => {
-    const row = $("#" + id).closest(".unit-row");
-    row.hidden = outOfOrder;
-    row.querySelectorAll("input").forEach(input => { input.disabled = outOfOrder; });
-  });
   if (outOfOrder) {
     $("#out-of-order-execution").checked = true;
     $("#speculative-execution").checked = true;
@@ -3068,6 +2910,68 @@ function updateMemoryControls() {
     .forEach(selector => { $(selector).disabled = !available || !direct; });
   ["#i-cache-size", "#d-cache-size", "#cache-line", "#cache-latency", "#memory-latency"]
     .forEach(selector => { $(selector).disabled = !available || !cache; });
+}
+
+function updatePredictorControls() {
+  $("#o3-predictor-parameters").hidden = $("#cpu-model").value !== "out-of-order"
+    || $("#o3-branch-predictor").value === "ideal";
+}
+
+function openPredictorParameters() {
+  const predictor = $("#o3-branch-predictor").value;
+  if (!predictorFields[predictor]) return;
+  const parameters = predictorParameterDraft[predictor]
+    || o3Defaults.branchPredictorParameters?.[predictor] || {};
+  $("#predictor-title").textContent = predictorNames[predictor] + " parameters";
+  $("#predictor-fields").innerHTML = predictorFields[predictor].map(
+    ([key, label, minimum, maximum, help]) => {
+      const value = parameters[key];
+      const displayed = Array.isArray(value) ? value.join(", ") : value ?? "";
+      const kind = minimum === null ? "text" : "number";
+      const range = minimum === null ? "" : ` min="${minimum}" max="${maximum}" step="1"`;
+      return `<label class="${minimum === null ? "wide" : ""}">${escapeHtml(label)}<input name="${key}" type="${kind}" value="${escapeHtml(displayed)}"${range} required>${help ? `<small>${escapeHtml(help)}</small>` : ""}</label>`;
+    }).join("");
+  $("#predictor-dialog").showModal();
+}
+
+async function savePredictorParameters(event) {
+  event.preventDefault();
+  const predictor = $("#o3-branch-predictor").value;
+  const parameters = {};
+  for (const [key] of predictorFields[predictor]) {
+    const input = $("#predictor-form").elements.namedItem(key);
+    if (key === "tagTableTagWidths" || key === "logTagTableSizes") {
+      const parts = input.value.trim().split(/[\s,]+/);
+      parameters[key] = parts.map(Number);
+      if (parts.length !== 8 || parameters[key].some(number => !Number.isInteger(number))) {
+        await showActionMessage("Branch predictor parameters", `${key} needs eight comma-separated whole numbers.`);
+        return;
+      }
+    } else {
+      parameters[key] = Number(input.value);
+      if (!Number.isInteger(parameters[key])) {
+        await showActionMessage("Branch predictor parameters", `${key} must be a whole number.`);
+        return;
+      }
+    }
+  }
+  const powerOfTwo = number => number > 0 && Number.isInteger(Math.log2(number));
+  for (const key of ["localPredictorSize", "localHistoryTableSize", "globalPredictorSize", "choicePredictorSize", "BTBEntries"]) {
+    if (key in parameters && !powerOfTwo(parameters[key])) {
+      await showActionMessage("Branch predictor parameters", `${key} must be a power of two.`);
+      return;
+    }
+  }
+  if (predictor === "local" && !powerOfTwo(parameters.localPredictorSize / parameters.localCtrBits)) {
+    await showActionMessage("Branch predictor parameters", "Local storage divided by counter bits must give a power-of-two number of entries.");
+    return;
+  }
+  if (predictor === "tage" && parameters.maxHist <= parameters.minHist) {
+    await showActionMessage("Branch predictor parameters", "TAGE maximum history must exceed its minimum history.");
+    return;
+  }
+  predictorParameterDraft[predictor] = parameters;
+  $("#predictor-dialog").close();
 }
 
 async function openCpuConfiguration() {
@@ -3107,10 +3011,21 @@ async function openCpuConfiguration() {
     $("#issue-width").value = config.issueWidth;
     $("#writeback-width").value = config.writebackWidth;
     $("#commit-width").value = config.commitWidth;
+    $("#int-alu-units").value = config.intAluUnits || 1;
+    $("#int-mul-units").value = config.intMulUnits || 1;
+    $("#int-div-units").value = config.intDivUnits || 1;
+    $("#float-alu-units").value = config.floatAluUnits || 1;
+    $("#float-mul-units").value = config.floatMulUnits || 1;
+    $("#float-div-units").value = config.floatDivUnits || 1;
+    $("#memory-units").value = config.memoryUnits || 1;
     $("#rob-entries").value = config.robEntries;
     $("#iq-entries").value = config.iqEntries;
     $("#lq-entries").value = config.lqEntries;
     $("#sq-entries").value = config.sqEntries;
+    $("#o3-branch-predictor").value = config.branchPredictor || "ideal";
+    predictorParameterDraft = JSON.parse(JSON.stringify(
+      config.branchPredictorParameters || o3Defaults.branchPredictorParameters || {}));
+    updatePredictorControls();
     $("#o3-evaluation-label").value = config.o3EvaluationLabel || "";
     $("#out-of-order-execution").checked = config.outOfOrderExecution !== false;
     $("#speculative-execution").checked = config.speculativeExecution !== false;
@@ -3269,7 +3184,6 @@ function clearCurrentProject() {
   $("#cycle-position").textContent = "Cycle —/—";
   $("#step").disabled = true;
   updateCycleNavigation();
-  manual.setConfig(null);
 }
 
 
@@ -3383,42 +3297,7 @@ $("#body").addEventListener("blur", () => {
   clearOpcodeSnippetSession();
   closeOpcodePopup();
 });
-const vimMode = createVimMode({
-  editor: $("#body"),
-  bar: $("#vim-bar"),
-  status: $("#vim-status"),
-  pending: $("#vim-pending"),
-  message: $("#vim-message"),
-  commandLine: $("#vim-command"),
-  scrollArea: () => document.querySelector(".editor-area"),
-  lineElement: lineNumber => document.querySelector(`.source-line[data-line="${lineNumber}"]`),
-  isActive: () => Boolean(current),
-  change(start, end, replacement, selectionStart) {
-    if (editTouchesProtected($("#body").value, start, end)) return false;
-    applyEditorChange(start, end, replacement, selectionStart, selectionStart, null);
-    return true;
-  },
-  undo: undoEditor,
-  redo: redoEditor,
-  save,
-  search(query) {
-    $("#search").value = query;
-    syncEditor();
-  },
-  lookup: position => lookUpInstruction($("#body").value, position)
-});
-const manual = createManual({
-  pane: $("#manual"),
-  highlight: highlightAsmLine,
-  escapeHtml,
-  openCpuConfiguration
-});
 $("#body").addEventListener("keydown", event => {
-  if (event.key === "F1") {
-    event.preventDefault();
-    lookUpInstruction(event.target.value, event.target.selectionStart);
-    return;
-  }
   const isTab = event.key === "Tab" || event.key === "ISO_Left_Tab" || event.code === "Tab";
   if (isTab && opcodeSnippetSession) {
     event.preventDefault();
@@ -3441,7 +3320,6 @@ $("#body").addEventListener("keydown", event => {
     closeOpcodePopup({suppress: true});
     return;
   }
-  if (vimMode.handleKeydown(event)) return;
   clearOpcodeSnippetSession();
   if (isTab) {
     event.preventDefault();
@@ -3485,17 +3363,6 @@ $("#body").addEventListener("keydown", event => {
     applyEditorChange(start, end, replacement, caret, caret, viewport);
   }
 });
-$("#body").addEventListener("click", event => {
-  if (!event.ctrlKey && !event.metaKey) return;
-  lookUpInstruction(event.target.value, event.target.selectionStart);
-});
-document.addEventListener("keydown", event => {
-  if (event.key !== "F1" || event.defaultPrevented) return;
-  if (document.querySelector("dialog[open]")) return;
-  event.preventDefault();
-  showTab("manual");
-  manual.focusSearch();
-});
 document.addEventListener("selectionchange", handleOpcodeSelectionChange);
 $("#opcode-popup-close").addEventListener("mousedown", event => event.preventDefault());
 $("#opcode-popup-close").onclick = () => {
@@ -3537,13 +3404,6 @@ $("#float-register-format").onchange = event => {
 $("#memory-format").value = localStorage.getItem("ase-studio-memory-format") || "hex";
 $("#memory-format").onchange = event => setMemoryFormat(event.target.value);
 setEditorFontSize(localStorage.getItem("ase-studio-editor-font-size") || 14);
-$("#vim-mode").checked = localStorage.getItem("ase-studio-vim-mode") === "on";
-vimMode.setEnabled($("#vim-mode").checked);
-$("#vim-mode").onchange = event => {
-  localStorage.setItem("ase-studio-vim-mode", event.target.checked ? "on" : "off");
-  vimMode.setEnabled(event.target.checked);
-  if (current) $("#body").focus();
-};
 $("#editor-font-size").oninput = event => setEditorFontSize(event.target.value);
 $("#theme-toggle").onclick = () => {
   const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
@@ -3558,63 +3418,6 @@ $("#close-about").onclick = () => $("#about-dialog").close();
 $("#about-dialog").onclick = event => {
   if (event.target === $("#about-dialog")) $("#about-dialog").close();
 };
-$("#new-folder").onclick = createProjectFolder;
-const PROJECT_DRAG_TYPE = "application/x-ase-project";
-const projectList = $("#projects");
-const projectDropTarget = target => {
-  const folder = target.closest("[data-folder-drop]");
-  return folder ? Number(folder.dataset.folderDrop) : null;
-};
-const clearProjectDropTarget = () => [projectList, ...projectList.querySelectorAll(".drop-target")]
-  .forEach(element => element.classList.remove("drop-target"));
-projectList.onclick = event => {
-  const toggle = event.target.closest("[data-folder-toggle]");
-  if (toggle) {
-    const folder = projectFolders[Number(toggle.dataset.folderToggle)];
-    const element = toggle.closest(".project-folder");
-    const collapsed = !element.classList.contains("collapsed");
-    element.classList.toggle("collapsed", collapsed);
-    toggle.setAttribute("aria-expanded", String(!collapsed));
-    if (folder) setProjectFolderCollapsed(folder.name, collapsed);
-    return;
-  }
-  const rename = event.target.closest("[data-folder-rename]");
-  if (rename) return renameProjectFolder(Number(rename.dataset.folderRename));
-  const remove = event.target.closest("[data-folder-delete]");
-  if (remove) return deleteProjectFolder(Number(remove.dataset.folderDelete));
-  const project = event.target.closest(".project");
-  if (project) openProject(project.dataset.name);
-};
-projectList.addEventListener("dragstart", event => {
-  const project = event.target.closest(".project");
-  if (!project) return;
-  event.dataTransfer.setData(PROJECT_DRAG_TYPE, project.dataset.name);
-  event.dataTransfer.effectAllowed = "move";
-  project.classList.add("dragging");
-});
-projectList.addEventListener("dragend", event => {
-  event.target.closest(".project")?.classList.remove("dragging");
-  clearProjectDropTarget();
-});
-projectList.addEventListener("dragover", event => {
-  if (!event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
-  event.preventDefault();
-  event.dataTransfer.dropEffect = "move";
-  const target = event.target.closest("[data-folder-drop]") || projectList;
-  if (target.classList.contains("drop-target")) return;
-  clearProjectDropTarget();
-  target.classList.add("drop-target");
-});
-projectList.addEventListener("dragleave", event => {
-  if (!projectList.contains(event.relatedTarget)) clearProjectDropTarget();
-});
-projectList.addEventListener("drop", event => {
-  const name = event.dataTransfer.getData(PROJECT_DRAG_TYPE);
-  clearProjectDropTarget();
-  if (!name) return;
-  event.preventDefault();
-  moveProjectToFolder(name, projectDropTarget(event.target));
-});
 $("#new").onclick = async () => {
   if (!await resolveUnsavedProject("create a new project")) return;
   const name = await actionDialog({
@@ -3709,8 +3512,14 @@ $("#cpu-model").onchange = () => {
     const defaultInputs = {
       intAlu: "int-alu", intMul: "int-mul", intDiv: "int-div",
       floatAlu: "float-alu", floatMul: "float-mul", floatDiv: "float-div",
-      dispatchWidth: "dispatch-width", issueWidth: "issue-width",
-      writebackWidth: "writeback-width", commitWidth: "commit-width"
+      fetchWidth: "fetch-width", decodeWidth: "decode-width",
+      renameWidth: "rename-width", dispatchWidth: "dispatch-width",
+      issueWidth: "issue-width",
+      writebackWidth: "writeback-width", commitWidth: "commit-width",
+      intAluUnits: "int-alu-units", intMulUnits: "int-mul-units",
+      intDivUnits: "int-div-units", floatAluUnits: "float-alu-units",
+      floatMulUnits: "float-mul-units", floatDivUnits: "float-div-units",
+      memoryUnits: "memory-units"
     };
     for (const [key, id] of Object.entries(defaultInputs)) {
       if (o3Defaults[key] !== undefined) $("#" + id).value = o3Defaults[key];
@@ -3720,6 +3529,7 @@ $("#cpu-model").onchange = () => {
       if (o3Defaults[key] !== undefined) $("#" + unit + "-pipelined").checked = o3Defaults[key];
     }
     const defaultStages = new Set(["issue", "execute", "memory", "cdb", "commit"]);
+    $("#o3-branch-predictor").value = o3Defaults.branchPredictor || "ideal";
     document.querySelectorAll("[data-o3-stage]").forEach(input => {
       input.checked = defaultStages.has(input.dataset.o3Stage);
     });
@@ -3727,7 +3537,12 @@ $("#cpu-model").onchange = () => {
   }
   updateForwardingControl();
   updateMemoryControls();
+  updatePredictorControls();
 };
+$("#o3-branch-predictor").onchange = updatePredictorControls;
+$("#o3-predictor-parameters").onclick = openPredictorParameters;
+$("#cancel-predictor").onclick = () => $("#predictor-dialog").close();
+$("#predictor-form").onsubmit = savePredictorParameters;
 $("#memory-mode").onchange = updateMemoryControls;
 $("#cancel-submission").onclick = () => $("#submission-dialog").close();
 $("#submission-dialog").addEventListener("cancel", event => {
@@ -3804,11 +3619,20 @@ $("#cpu-form").onsubmit = async event => {
     issueWidth: Number($("#issue-width").value),
     writebackWidth: Number($("#writeback-width").value),
     commitWidth: Number($("#commit-width").value),
+    intAluUnits: Number($("#int-alu-units").value),
+    intMulUnits: Number($("#int-mul-units").value),
+    intDivUnits: Number($("#int-div-units").value),
+    floatAluUnits: Number($("#float-alu-units").value),
+    floatMulUnits: Number($("#float-mul-units").value),
+    floatDivUnits: Number($("#float-div-units").value),
+    memoryUnits: Number($("#memory-units").value),
     robEntries: Number($("#rob-entries").value),
     iqEntries: Number($("#iq-entries").value),
     lqEntries: Number($("#lq-entries").value),
     sqEntries: Number($("#sq-entries").value),
-    branchPredictor: $("#cpu-model").value === "out-of-order" ? "ideal" : "local",
+    branchPredictor: $("#cpu-model").value === "out-of-order"
+      ? $("#o3-branch-predictor").value : "local",
+    branchPredictorParameters: predictorParameterDraft,
     speculativeExecution: $("#speculative-execution").checked,
     outOfOrderExecution: $("#out-of-order-execution").checked,
     o3EvaluationLabel: $("#o3-evaluation-label").value.trim(),
@@ -3825,7 +3649,6 @@ $("#cpu-form").onsubmit = async event => {
     current.isa = updatedProject.isa || current.isa;
     closeOpcodePopup();
     $("#cpu-dialog").close();
-    refreshManualConfig();
     lastNormalLog = "CPU configuration saved. It will be used on the next Run.";
     lastAdvancedLog = lastNormalLog;
     updateLog();
@@ -3996,15 +3819,6 @@ document.addEventListener("keydown", event => {
     $("#search").focus();
   }
 }, true);
-document.addEventListener("keydown", event => {
-  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-  if (!stepMode || !pipelineData || playbackCycle === null) return;
-  if (event.target.closest("input, textarea, select, [contenteditable]")) return;
-  if (document.querySelector("dialog[open]")) return;
-  event.preventDefault();
-  movePlaybackCycle(event.key === "ArrowLeft" ? -1 : 1);
-});
 window.aseHasUnsavedChanges = () => sourceDirty;
 window.addEventListener("beforeunload", writeLocalDraft);
 
@@ -4043,10 +3857,226 @@ registerResizer.addEventListener("pointerup", event => {
   registerResizer.classList.remove("dragging");
 });
 
+function pipelineScrollbarMetrics(viewport, extent, position, trackLength) {
+  const limit = Math.max(0, extent - viewport);
+  const length = Math.min(trackLength, Math.max(24,
+    extent > 0 ? trackLength * viewport / extent : trackLength));
+  const travel = Math.max(0, trackLength - length);
+  const offset = limit ? travel * Math.max(0, Math.min(limit, position)) / limit : 0;
+  return {limit, length, travel, offset};
+}
+
+function pipelineScrollbarsNeeded(width, height, contentWidth, contentHeight, size) {
+  let horizontal = false;
+  let vertical = false;
+  // An overflowing axis reduces the other axis's available space. Start with
+  // the full frame each time so a resize cannot leave unnecessary bars behind.
+  for (let pass = 0; pass < 3; pass++) {
+    horizontal = contentWidth > width - (vertical ? size : 0) + 1;
+    vertical = contentHeight > height - (horizontal ? size : 0) + 1;
+  }
+  return {horizontal: width > 0 && horizontal, vertical: height > 0 && vertical};
+}
+
+function installPipelineScrollControls(scroll, buttons, getStep, tracks = []) {
+  const frame = scroll.parentElement;
+  const scrollbarSize = 18;
+  const integrated = tracks.length === 2;
+  if (integrated) frame.classList.add("scrollbars-ready");
+  const axes = {
+    horizontal: ["scrollLeft", "scrollWidth", "clientWidth", "clientX", "left", "width", "left", "right"],
+    vertical: ["scrollTop", "scrollHeight", "clientHeight", "clientY", "top", "height", "up", "down"]
+  };
+  const directions = {
+    left: ["scrollLeft", "scrollWidth", "clientWidth", -1],
+    right: ["scrollLeft", "scrollWidth", "clientWidth", 1],
+    up: ["scrollTop", "scrollHeight", "clientHeight", -1],
+    down: ["scrollTop", "scrollHeight", "clientHeight", 1]
+  };
+  function update() {
+    if (integrated) {
+      const needed = pipelineScrollbarsNeeded(frame.clientWidth, frame.clientHeight,
+        scroll.scrollWidth, scroll.scrollHeight, scrollbarSize);
+      frame.style.setProperty("--pipeline-scrollbar-x", needed.horizontal ? scrollbarSize + "px" : "0px");
+      frame.style.setProperty("--pipeline-scrollbar-y", needed.vertical ? scrollbarSize + "px" : "0px");
+      for (const track of tracks) {
+        track.parentElement.hidden = !needed[track.dataset.pipelineScrollAxis];
+      }
+    }
+    for (const button of buttons) {
+      const [position, extent, viewport, sign] = directions[button.dataset.pipelineScroll];
+      const limit = Math.max(0, scroll[extent] - scroll[viewport]);
+      button.disabled = scroll[viewport] === 0 || (sign < 0
+        ? scroll[position] <= 0 : scroll[position] >= limit - 1);
+    }
+    for (const track of tracks) {
+      const [position, extent, viewport, , offset, length] = axes[track.dataset.pipelineScrollAxis];
+      const metrics = pipelineScrollbarMetrics(scroll[viewport], scroll[extent],
+        scroll[position], track[viewport]);
+      const thumb = track.firstElementChild;
+      thumb.style[length] = metrics.length + "px";
+      thumb.style[offset] = metrics.offset + "px";
+      thumb.setAttribute("aria-valuemax", String(Math.round(metrics.limit)));
+      thumb.setAttribute("aria-valuenow", String(Math.round(
+        Math.max(0, Math.min(metrics.limit, scroll[position])))));
+    }
+  }
+  for (const button of buttons) {
+    const direction = button.dataset.pipelineScroll;
+    let repeatTimer = null;
+    let activePointer = null;
+    let repeated = false;
+    function move() {
+      if (button.disabled) return;
+      const [position, extent, viewport, sign] = directions[direction];
+      const limit = Math.max(0, scroll[extent] - scroll[viewport]);
+      scroll[position] = Math.max(0, Math.min(limit,
+        scroll[position] + sign * getStep(direction)));
+      update();
+    }
+    function stop() {
+      clearTimeout(repeatTimer);
+      repeatTimer = null;
+      if (activePointer !== null && button.hasPointerCapture(activePointer)) {
+        button.releasePointerCapture(activePointer);
+      }
+      activePointer = null;
+    }
+    function repeat() {
+      repeated = true;
+      move();
+      if (!button.disabled) repeatTimer = setTimeout(repeat, 70);
+    }
+    button.addEventListener("click", event => {
+      // Pointer holds already scrolled; keyboard and ordinary clicks move once.
+      if (!repeated || event.detail === 0) move();
+      repeated = false;
+    });
+    button.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || button.disabled) return;
+      stop();
+      repeated = false;
+      activePointer = event.pointerId;
+      button.setPointerCapture(activePointer);
+      repeatTimer = setTimeout(repeat, 350);
+    });
+    button.addEventListener("pointerup", stop);
+    button.addEventListener("pointercancel", stop);
+    button.addEventListener("lostpointercapture", stop);
+    window.addEventListener("blur", stop);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stop();
+    });
+  }
+  for (const track of tracks) {
+    const [position, extent, viewport, coordinate, offset, , backward, forward] = axes[track.dataset.pipelineScrollAxis];
+    const thumb = track.firstElementChild;
+    let drag = null;
+    function moveTo(value) {
+      scroll[position] = Math.max(0, Math.min(scroll[extent] - scroll[viewport], value));
+      update();
+    }
+    function stopDrag() {
+      const pointerId = drag?.pointerId;
+      drag = null;
+      thumb.classList.remove("dragging");
+      if (pointerId !== undefined && track.hasPointerCapture(pointerId)) {
+        track.releasePointerCapture(pointerId);
+      }
+    }
+    track.addEventListener("pointerdown", event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      thumb.focus({preventScroll: true});
+      if (event.target === thumb) {
+        drag = {pointerId: event.pointerId, coordinate: event[coordinate], position: scroll[position]};
+        track.setPointerCapture(event.pointerId);
+        thumb.classList.add("dragging");
+      } else {
+        const metrics = pipelineScrollbarMetrics(scroll[viewport], scroll[extent],
+          scroll[position], track[viewport]);
+        const before = event[coordinate] - track.getBoundingClientRect()[offset] < metrics.offset;
+        moveTo(scroll[position] + (before ? -1 : 1) * scroll[viewport]);
+      }
+    });
+    track.addEventListener("pointermove", event => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const metrics = pipelineScrollbarMetrics(scroll[viewport], scroll[extent],
+        scroll[position], track[viewport]);
+      if (metrics.travel) moveTo(drag.position
+        + (event[coordinate] - drag.coordinate) * metrics.limit / metrics.travel);
+    });
+    track.addEventListener("pointerup", stopDrag);
+    track.addEventListener("pointercancel", stopDrag);
+    track.addEventListener("lostpointercapture", stopDrag);
+    window.addEventListener("blur", stopDrag);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopDrag();
+    });
+    thumb.addEventListener("keydown", event => {
+      const keys = track.dataset.pipelineScrollAxis === "horizontal"
+        ? {ArrowLeft: -getStep(backward), ArrowRight: getStep(forward)}
+        : {ArrowUp: -getStep(backward), ArrowDown: getStep(forward)};
+      keys.PageUp = -scroll[viewport];
+      keys.PageDown = scroll[viewport];
+      let target;
+      if (event.key === "Home") target = 0;
+      else if (event.key === "End") target = scroll[extent] - scroll[viewport];
+      else if (Object.hasOwn(keys, event.key)) target = scroll[position] + keys[event.key];
+      else return;
+      event.preventDefault();
+      moveTo(target);
+    });
+    // Scroll-wheel events over the replacement track still reach the viewport.
+    track.parentElement.addEventListener("wheel", event => {
+      const scale = event.deltaMode === 1 ? 27
+        : event.deltaMode === 2 ? scroll[viewport] : 1;
+      const delta = track.dataset.pipelineScrollAxis === "horizontal"
+        ? event.deltaX || event.deltaY : event.deltaY;
+      if (!delta) return;
+      event.preventDefault();
+      moveTo(scroll[position] + delta * scale);
+    }, {passive: false});
+  }
+  scroll.addEventListener("scroll", update, {passive: true});
+  if ("ResizeObserver" in window) {
+    let resizePending = false;
+    const observer = new ResizeObserver(() => {
+      // Changing scrollbar visibility changes the observed viewport size.
+      // Defer that layout change to avoid a ResizeObserver delivery loop.
+      if (resizePending) return;
+      resizePending = true;
+      window.requestAnimationFrame(() => {
+        resizePending = false;
+        update();
+      });
+    });
+    observer.observe(scroll);
+    observer.observe(scroll.firstElementChild);
+    if (integrated) observer.observe(frame);
+  }
+  update();
+  return update;
+}
+
+function pipelinePointerOnScrollbar(scroll, event) {
+  const bounds = scroll.getBoundingClientRect();
+  const x = event.clientX - bounds.left;
+  const y = event.clientY - bounds.top;
+  return x < scroll.clientLeft || x >= scroll.clientLeft + scroll.clientWidth
+    || y < scroll.clientTop || y >= scroll.clientTop + scroll.clientHeight;
+}
+
 const pipelineScroll = $("#pipeline-scroll");
+const updatePipelineScrollButtons = installPipelineScrollControls(
+  pipelineScroll, document.querySelectorAll("[data-pipeline-scroll]"),
+  direction => direction === "left" || direction === "right"
+    ? Number($("#cell-width").value) : 27,
+  document.querySelectorAll("[data-pipeline-scroll-axis]"));
 let pipelinePan = null;
 pipelineScroll.addEventListener("pointerdown", event => {
   if (event.button !== 0 && event.button !== 1) return;
+  if (pipelinePointerOnScrollbar(pipelineScroll, event)) return;
   if (event.button === 0 && event.target.closest(".jump-arrow")) return;
   if (event.button === 1) event.preventDefault();
   pipelinePan = {

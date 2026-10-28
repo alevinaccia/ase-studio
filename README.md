@@ -74,63 +74,6 @@ The installer adds ASE Studio to the current user's application menu. When a
 desktop directory is available, it also creates a trusted `ASE Studio.desktop`
 shortcut there.
 
-## Running on macOS (Apple Silicon)
-
-The simulator tools and the native window are Linux-only, so on a Mac ASE
-Studio runs inside a lightweight Ubuntu 22.04 machine managed by
-[OrbStack](https://orbstack.dev) and is used from a Mac browser. The machine is
-native arm64, so nothing runs under x86 emulation.
-
-Requirements: an Apple Silicon Mac, OrbStack, and about 10 GB of free disk.
-
-1. Install OrbStack and open it once:
-
-   ```bash
-   brew install --cask orbstack
-   ```
-
-2. Get this repository on the Mac:
-
-   ```bash
-   git clone https://github.com/cad-polito-it/ase-studio.git
-   cd ase-studio
-   ```
-
-3. Create the Linux machine and install everything inside it. This compiles
-   the RISC-V toolchain and gem5 from source and takes 30-90 minutes:
-
-   ```bash
-   ./macos.sh setup
-   ```
-
-4. Start ASE Studio. It opens `http://localhost:8765` in your browser:
-
-   ```bash
-   ./macos.sh start
-   ```
-
-Use `./macos.sh stop`, `restart`, `status`, or `logs` to manage the server.
-`start` also boots OrbStack and the machine when they are stopped.
-
-`start` and `restart` first copy this checkout into the machine, so the server
-runs the ASE Studio files you have on the Mac (`./macos.sh sync` copies them
-without restarting; frontend changes then need only a browser reload). Keep the
-checkout up to date with `git pull`, or set `ASE_SYNC=0` to keep running the
-copy installed in the machine, for example after using the in-app updater.
-
-`start` and `restart` also pull the simulator and gem5 from upstream and
-rebuild gem5 whenever its executable was not built from its checked-out source,
-showing the build in the terminal. They also list upstream ASE Studio commits
-this checkout does not include yet. `./macos.sh update` does only this; set
-`ASE_UPDATE=0` to skip it, for example when offline.
-
-Projects, results, and submissions live inside the machine under
-`~/ase_riscv_gem5_sim`. From macOS they are reachable in Finder at
-`~/OrbStack/ase/home/<user>/ase_riscv_gem5_sim`. Submissions are also
-downloaded by the browser when they are created. Actions that open Linux
-desktop applications, such as **Open with…** and the tool installers in
-Settings, are not available in the browser.
-
 ## License and educational use
 
 This project is intended for education and research. The repository is

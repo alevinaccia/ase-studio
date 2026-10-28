@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Alessandro Vinaccia <vinacciaalessandro@gmail.com>
 # SPDX-License-Identifier: GPL-2.0-only
 # Run ASE Studio on macOS (Apple Silicon) inside an OrbStack Ubuntu machine and
-# use it from a Mac browser. See "Running on macOS" in README.md.
+# use it from a Mac browser. See "Running on macOS" in FORK.md.
 #
 # Usage: ./macos.sh [setup|start|stop|restart|status|logs|open|sync|update]   (default: start)
 #
